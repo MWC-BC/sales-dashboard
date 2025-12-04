@@ -1,5 +1,6 @@
 # -------------------------------------------------------------------
-# dashboard.py  (final working version with password gate + crash fixes)
+# dashboard.py  (Final production version)
+# Password gate + full Intent & Coaching dashboard
 # -------------------------------------------------------------------
 
 from pathlib import Path
@@ -8,11 +9,13 @@ import pandas as pd
 import numpy as np
 import altair as alt
 
+
 # -------------------------------------------------------------------
 # PASSWORD GATE
 # -------------------------------------------------------------------
 def check_password():
     """Simple password gate using Streamlit secrets."""
+
     def password_entered():
         if st.session_state["password"] == st.secrets["access"]["code"]:
             st.session_state["password_correct"] = True
@@ -38,6 +41,7 @@ def check_password():
 if not check_password():
     st.stop()
 
+
 # -------------------------------------------------------------------
 # STREAMLIT CONFIG
 # -------------------------------------------------------------------
@@ -47,24 +51,22 @@ st.set_page_config(
 )
 alt.data_transformers.disable_max_rows()
 
+
 # -------------------------------------------------------------------
 # PATHS
 # -------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent
 DATA_CSV = BASE_DIR / "Output" / "all_calls_recordings_enriched_CPD_coached.csv"
 
+
 # -------------------------------------------------------------------
-# LOAD DATA
+# LOAD & CLEAN DATA
 # -------------------------------------------------------------------
 @st.cache_data
 def load_data():
     df = pd.read_csv(DATA_CSV)
 
-    # -----------------------------------
-    # FIX MISSING REQUIRED COLUMNS
-    # -----------------------------------
-
-    # Unified "intent"
+    # Intent field normalization
     if "intent" not in df.columns:
         df["intent"] = df["llm_cpd_intent"].fillna(df["rule_intent"])
         df["intent"] = df["intent"].fillna("Unknown")
@@ -73,21 +75,21 @@ def load_data():
     if "sales_rep" not in df.columns:
         df["sales_rep"] = "Unassigned"
 
-    # Guarantee provider exists + format it
+    # Ensure provider exists
     if "provider" in df.columns:
         df["provider"] = df["provider"].astype(str).str.title()
     else:
         df["provider"] = "Unknown"
 
-    # Guarantee datetime exists + validate
+    # Clean datetime
     df["call_datetime"] = pd.to_datetime(df["call_datetime"], errors="coerce")
     df = df[df["call_datetime"].notna()]
 
     # Derive call_type
     df["call_type"] = "Standard"
-    df.loc[df["is_voicemail"] == True, "call_type"] = "Voicemail"
-    df.loc[df["duration_seconds"] < 1, "call_type"] = "Too Short"
-    df.loc[df["status"] == "no-answer", "call_type"] = "No Answer"
+    df.loc[df.get("is_voicemail", False) == True, "call_type"] = "Voicemail"
+    df.loc[df.get("duration_seconds", 999) < 1, "call_type"] = "Too Short"
+    df.loc[df.get("status", "") == "no-answer", "call_type"] = "No Answer"
 
     # Ensure coaching score columns exist
     score_cols = [
@@ -104,24 +106,21 @@ def load_data():
     return df
 
 
-# Load data
 df = load_data()
+
 
 # -------------------------------------------------------------------
 # SIDEBAR FILTERS
 # -------------------------------------------------------------------
 st.sidebar.header("Filters")
 
-# Date range
-min_date = df["call_datetime"].min()
-max_date = df["call_datetime"].max()
+# Date Range
+min_date = df["call_datetime"].min().date()
+max_date = df["call_datetime"].max().date()
+date_range = st.sidebar.date_input("Date Range", [min_date, max_date])
+start, end = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
 
-date_range = st.sidebar.date_input(
-    "Date Range",
-    [min_date, max_date]
-)
-
-# Sales Rep filter
+# Rep filter
 rep_list = ["All Reps"] + sorted(df["sales_rep"].dropna().unique().tolist())
 selected_rep = st.sidebar.selectbox("Sales Rep", rep_list)
 
@@ -134,27 +133,22 @@ include_voicemail = st.sidebar.checkbox("Include Voicemail", True)
 include_no_answer = st.sidebar.checkbox("Include No Answer", True)
 include_too_short = st.sidebar.checkbox("Include Too Short (<1s)", True)
 
+
 # -------------------------------------------------------------------
 # APPLY FILTERS
 # -------------------------------------------------------------------
 filtered = df.copy()
-
-# Date range filter
-start, end = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
 filtered = filtered[
-    (filtered["call_datetime"] >= start)
-    & (filtered["call_datetime"] <= end)
+    (filtered["call_datetime"] >= start) &
+    (filtered["call_datetime"] <= end)
 ]
 
-# Carrier filter
-if selected_carrier != "All":
-    filtered = filtered[filtered["provider"] == selected_carrier]
-
-# Rep filter
 if selected_rep != "All Reps":
     filtered = filtered[filtered["sales_rep"] == selected_rep]
 
-# Call type filters
+if selected_carrier != "All":
+    filtered = filtered[filtered["provider"] == selected_carrier]
+
 exclude_types = []
 if not include_voicemail:
     exclude_types.append("Voicemail")
@@ -166,16 +160,18 @@ if not include_too_short:
 if exclude_types:
     filtered = filtered[~filtered["call_type"].isin(exclude_types)]
 
+
 # -------------------------------------------------------------------
 # PAGE HEADER
 # -------------------------------------------------------------------
 st.title("Sales Call Coaching Dashboard")
-st.write("Use the sidebar to filter by Sales Rep, date range, carrier, and call type.")
+st.caption("Filter by rep, date range, carrier, and call type in the sidebar.")
 
 tabs = st.tabs(["Buying Intent", "Coaching"])
 
+
 # -------------------------------------------------------------------
-# BUYING INTENT TAB
+# TAB 1: BUYING INTENT
 # -------------------------------------------------------------------
 with tabs[0]:
     st.subheader("Intent Overview")
@@ -187,7 +183,7 @@ with tabs[0]:
     c1.metric("Total Calls", total_calls)
     c2.metric("Distinct CPD Intents", distinct_intents)
 
-    # Intent distribution
+    # Intent distribution chart
     intent_counts = (
         filtered["intent"]
         .fillna("Unknown")
@@ -196,33 +192,59 @@ with tabs[0]:
         .rename(columns={"index": "intent", "intent": "count"})
     )
 
-    chart = (
-        alt.Chart(intent_counts)
-        .mark_bar()
-        .encode(
-            x="intent:N",
-            y="count:Q",
-            tooltip=["intent", "count"],
-            color=alt.Color("intent:N", legend=None),
+    if len(intent_counts) > 0:
+        chart = (
+            alt.Chart(intent_counts)
+            .mark_bar()
+            .encode(
+                x="intent:N",
+                y="count:Q",
+                tooltip=["intent", "count"],
+                color=alt.Color("intent:N", legend=None),
+            )
         )
-    )
 
-    labels = chart.mark_text(
-        align="center",
-        baseline="bottom",
-        dy=-5,
-        fontSize=14
-    ).encode(text="count:Q")
+        labels = chart.mark_text(
+            align="center",
+            baseline="bottom",
+            dy=-5,
+            fontSize=14
+        ).encode(text="count:Q")
 
-    st.altair_chart(chart + labels, use_container_width=True)
+        st.altair_chart(chart + labels, use_container_width=True)
+
+    st.subheader("Call Browser (Intent)")
+    filtered_sorted = filtered.sort_values("call_datetime", ascending=False)
+
+    if not filtered_sorted.empty:
+        options = (
+            filtered_sorted["call_datetime"].astype(str)
+            + " | " + filtered_sorted["sales_rep"]
+            + " | " + filtered_sorted["intent"]
+        )
+        selected = st.selectbox("Select a call:", options)
+        row = filtered_sorted.iloc[options.tolist().index(selected)]
+
+        c_left, c_right = st.columns(2)
+
+        with c_left:
+            st.markdown("### Intent Details")
+            st.write(f"**Intent:** {row['intent']}")
+            st.write(f"**LLM Reason:** {row.get('llm_cpd_reason', '')}")
+            st.write(f"**Rule Reason:** {row.get('rule_intent_reason', '')}")
+
+        with c_right:
+            st.markdown("### Transcript")
+            st.write(row.get("transcript", ""))
+
 
 # -------------------------------------------------------------------
-# COACHING TAB
+# TAB 2: COACHING
 # -------------------------------------------------------------------
 with tabs[1]:
-    st.subheader("Coaching Scores")
+    st.subheader("Coaching Overview")
 
-    scoring_cols = [
+    score_cols = [
         "coaching_opening_score",
         "coaching_discovery_score",
         "coaching_value_score",
@@ -230,41 +252,75 @@ with tabs[1]:
         "coaching_total_score",
     ]
 
-    coach_df = filtered[scoring_cols].dropna(how="all")
+    # Only rows with at least one score
+    scored = filtered.dropna(subset=["coaching_total_score"], how="all")
 
-    if coach_df.empty:
-        st.warning("No coaching data for selected filters.")
-    else:
-        avg_scores = coach_df.mean().reset_index()
-        avg_scores.columns = ["pillar", "score"]
+    if scored.empty:
+        st.warning("No coaching data in current filters.")
+        st.stop()
 
-        bar = (
-            alt.Chart(avg_scores)
-            .mark_bar()
-            .encode(
-                x=alt.X("pillar:N", title="Coaching Pillar"),
-                y=alt.Y("score:Q", title="Average Score"),
-                tooltip=["pillar", "score"],
-                color=alt.Color("pillar:N", legend=None),
-            )
+    # ---------------------------------------------------------------
+    # PER-REP SUMMARY TABLE (Wide Format)
+    # ---------------------------------------------------------------
+    st.subheader("Per-Rep Coaching Summary")
+
+    rep_summary = scored.groupby("sales_rep")[score_cols].mean()
+    rep_summary["Calls Coached"] = scored.groupby("sales_rep").size()
+    st.dataframe(rep_summary.style.format("{:.2f}"), use_container_width=True)
+
+    # ---------------------------------------------------------------
+    # SIDE-BY-SIDE PILLAR CHART BY REP
+    # ---------------------------------------------------------------
+    st.subheader("Coaching Scores by Pillar (Side-by-Side by Rep)")
+
+    melted = scored.melt(
+        id_vars=["sales_rep"],
+        value_vars=score_cols[:-1],  # exclude total score
+        var_name="Pillar",
+        value_name="Score"
+    )
+
+    pillar_chart = (
+        alt.Chart(melted)
+        .mark_bar()
+        .encode(
+            x=alt.X("Pillar:N", title="Pillar"),
+            y=alt.Y("mean(Score):Q", title="Average Score", scale=alt.Scale(domain=[0, 5])),
+            color="sales_rep:N",
+            column="sales_rep:N",
+            tooltip=["sales_rep", "Pillar", "Score"]
         )
+    )
 
-        bar_labels = bar.mark_text(
-            align="center",
-            baseline="bottom",
-            dy=-5,
-            fontSize=14,
-        ).encode(text="score:Q")
+    st.altair_chart(pillar_chart, use_container_width=True)
 
-        st.altair_chart(bar + bar_labels, use_container_width=True)
+    # ---------------------------------------------------------------
+    # CALL DETAIL (COACHING)
+    # ---------------------------------------------------------------
+    st.subheader("Call Browser (Coaching)")
 
-    st.subheader("Improvement Points")
-    if "coaching_improvement_points" in filtered.columns:
-        imp_list = (
-            filtered["coaching_improvement_points"]
-            .dropna()
-            .astype(str)
-            .tolist()
-        )
-        for item in imp_list:
-            st.write(f"- {item}")
+    options = (
+        scored["call_datetime"].astype(str)
+        + " | " + scored["sales_rep"]
+        + " | " + scored["intent"]
+    )
+
+    selected = st.selectbox("Select a coached call:", options)
+    row = scored.iloc[options.tolist().index(selected)]
+
+    left, right = st.columns(2)
+
+    with left:
+        st.markdown("### Coaching Summary")
+        st.write(row.get("coaching_summary", ""))
+
+        st.markdown("### Improvement Points")
+        pts = str(row.get("coaching_improvement_points", "")).split("\n")
+        for p in pts:
+            if p.strip():
+                st.write(f"- {p.strip()}")
+
+    with right:
+        st.markdown("### Transcript")
+        st.write(row.get("transcript", ""))
+
