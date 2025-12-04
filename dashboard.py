@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------
-# dashboard.py  (stable Streamlit Cloud version with password gate)
+# dashboard.py  (final working version with password gate + crash fixes)
 # -------------------------------------------------------------------
 
 from pathlib import Path
@@ -21,27 +21,20 @@ def check_password():
             st.session_state["password_correct"] = False
 
     if "password_correct" not in st.session_state:
-        st.text_input(
-            "Enter access code:",
-            type="password",
-            on_change=password_entered,
-            key="password",
-        )
+        st.text_input("Enter access code:", type="password",
+                      on_change=password_entered, key="password")
         return False
 
     if not st.session_state["password_correct"]:
-        st.text_input(
-            "Enter access code:",
-            type="password",
-            on_change=password_entered,
-            key="password",
-        )
+        st.text_input("Enter access code:", type="password",
+                      on_change=password_entered, key="password")
         st.error("Incorrect access code.")
         return False
 
     return True
 
 
+# STOP app until password is correct
 if not check_password():
     st.stop()
 
@@ -67,28 +60,36 @@ DATA_CSV = BASE_DIR / "Output" / "all_calls_recordings_enriched_CPD_coached.csv"
 def load_data():
     df = pd.read_csv(DATA_CSV)
 
-    # --- Create missing unified intent column ------------------------
+    # -----------------------------------
+    # FIX MISSING REQUIRED COLUMNS
+    # -----------------------------------
+
+    # Unified "intent"
     if "intent" not in df.columns:
-        df["intent"] = df["rule_intent"].fillna("").astype(str).str.strip()
-        df.loc[df["intent"] == "", "intent"] = (
-            df["llm_cpd_intent"].fillna("").astype(str).str.strip()
-        )
-        df["intent"].replace("", pd.NA, inplace=True)
+        df["intent"] = df["llm_cpd_intent"].fillna(df["rule_intent"])
+        df["intent"] = df["intent"].fillna("Unknown")
 
-    # Make provider pretty (Twilio / Telzio)
+    # Guarantee sales_rep exists
+    if "sales_rep" not in df.columns:
+        df["sales_rep"] = "Unassigned"
+
+    # Guarantee provider exists + format it
     if "provider" in df.columns:
-        df["provider"] = df["provider"].str.title()
+        df["provider"] = df["provider"].astype(str).str.title()
+    else:
+        df["provider"] = "Unknown"
 
-    # Create simple call_type category
+    # Guarantee datetime exists + validate
+    df["call_datetime"] = pd.to_datetime(df["call_datetime"], errors="coerce")
+    df = df[df["call_datetime"].notna()]
+
+    # Derive call_type
     df["call_type"] = "Standard"
     df.loc[df["is_voicemail"] == True, "call_type"] = "Voicemail"
-    df.loc[df["duration_seconds"] < 1, "call_type"] = "Too Short (<1s)"
+    df.loc[df["duration_seconds"] < 1, "call_type"] = "Too Short"
     df.loc[df["status"] == "no-answer", "call_type"] = "No Answer"
 
-    # Parse datetime
-    df["call_datetime"] = pd.to_datetime(df["call_datetime"], errors="coerce")
-
-    # Fix coaching scores if missing
+    # Ensure coaching score columns exist
     score_cols = [
         "coaching_opening_score",
         "coaching_discovery_score",
@@ -103,12 +104,12 @@ def load_data():
     return df
 
 
+# Load data
 df = load_data()
 
 # -------------------------------------------------------------------
 # SIDEBAR FILTERS
 # -------------------------------------------------------------------
-
 st.sidebar.header("Filters")
 
 # Date range
@@ -116,7 +117,8 @@ min_date = df["call_datetime"].min()
 max_date = df["call_datetime"].max()
 
 date_range = st.sidebar.date_input(
-    "Date Range", [min_date, max_date]
+    "Date Range",
+    [min_date, max_date]
 )
 
 # Sales Rep filter
@@ -153,16 +155,16 @@ if selected_rep != "All Reps":
     filtered = filtered[filtered["sales_rep"] == selected_rep]
 
 # Call type filters
-exclude = []
+exclude_types = []
 if not include_voicemail:
-    exclude.append("Voicemail")
+    exclude_types.append("Voicemail")
 if not include_no_answer:
-    exclude.append("No Answer")
+    exclude_types.append("No Answer")
 if not include_too_short:
-    exclude.append("Too Short (<1s)")
+    exclude_types.append("Too Short")
 
-if exclude:
-    filtered = filtered[~filtered["call_type"].isin(exclude)]
+if exclude_types:
+    filtered = filtered[~filtered["call_type"].isin(exclude_types)]
 
 # -------------------------------------------------------------------
 # PAGE HEADER
@@ -179,43 +181,40 @@ with tabs[0]:
     st.subheader("Intent Overview")
 
     total_calls = len(filtered)
-    total_intents = filtered["intent"].nunique()
+    distinct_intents = filtered["intent"].nunique()
 
-    col1, col2 = st.columns(2)
-    col1.metric("Total Calls in Filter", total_calls)
-    col2.metric("Distinct CPD Intents", total_intents)
+    c1, c2 = st.columns(2)
+    c1.metric("Total Calls", total_calls)
+    c2.metric("Distinct CPD Intents", distinct_intents)
 
-    # Bar: Count per intent
-    if total_calls > 0:
-        intent_counts = (
-            filtered["intent"]
-            .fillna("Unknown")
-            .value_counts()
-            .reset_index()
-            .rename(columns={"index": "intent", "intent": "count"})
+    # Intent distribution
+    intent_counts = (
+        filtered["intent"]
+        .fillna("Unknown")
+        .value_counts()
+        .reset_index()
+        .rename(columns={"index": "intent", "intent": "count"})
+    )
+
+    chart = (
+        alt.Chart(intent_counts)
+        .mark_bar()
+        .encode(
+            x="intent:N",
+            y="count:Q",
+            tooltip=["intent", "count"],
+            color=alt.Color("intent:N", legend=None),
         )
+    )
 
-        chart = (
-            alt.Chart(intent_counts)
-            .mark_bar()
-            .encode(
-                x="intent:N",
-                y="count:Q",
-                tooltip=["intent", "count"],
-                color=alt.Color("intent:N", legend=None),
-            )
-        )
+    labels = chart.mark_text(
+        align="center",
+        baseline="bottom",
+        dy=-5,
+        fontSize=14
+    ).encode(text="count:Q")
 
-        labels = (
-            chart.mark_text(
-                align="center",
-                baseline="bottom",
-                dy=-5,
-                fontSize=14
-            ).encode(text="count:Q")
-        )
-
-        st.altair_chart(chart + labels, use_container_width=True)
+    st.altair_chart(chart + labels, use_container_width=True)
 
 # -------------------------------------------------------------------
 # COACHING TAB
@@ -223,44 +222,49 @@ with tabs[0]:
 with tabs[1]:
     st.subheader("Coaching Scores")
 
-    # Score data
-    score_cols = [
+    scoring_cols = [
         "coaching_opening_score",
         "coaching_discovery_score",
         "coaching_value_score",
         "coaching_closing_score",
         "coaching_total_score",
     ]
-    score_df = filtered[score_cols].dropna()
 
-    if len(score_df) == 0:
-        st.warning("No coaching data available for these filters.")
+    coach_df = filtered[scoring_cols].dropna(how="all")
+
+    if coach_df.empty:
+        st.warning("No coaching data for selected filters.")
     else:
-        avg_scores = score_df.mean().reset_index()
+        avg_scores = coach_df.mean().reset_index()
         avg_scores.columns = ["pillar", "score"]
 
-        chart = (
+        bar = (
             alt.Chart(avg_scores)
             .mark_bar()
             .encode(
                 x=alt.X("pillar:N", title="Coaching Pillar"),
-                y=alt.Y("score:Q", title="Avg Score"),
+                y=alt.Y("score:Q", title="Average Score"),
                 tooltip=["pillar", "score"],
                 color=alt.Color("pillar:N", legend=None),
             )
         )
 
-        labels = chart.mark_text(
+        bar_labels = bar.mark_text(
             align="center",
             baseline="bottom",
             dy=-5,
-            fontSize=14
+            fontSize=14,
         ).encode(text="score:Q")
 
-        st.altair_chart(chart + labels, use_container_width=True)
+        st.altair_chart(bar + bar_labels, use_container_width=True)
 
     st.subheader("Improvement Points")
     if "coaching_improvement_points" in filtered.columns:
-        improvements = filtered["coaching_improvement_points"].dropna().tolist()
-        for item in improvements:
+        imp_list = (
+            filtered["coaching_improvement_points"]
+            .dropna()
+            .astype(str)
+            .tolist()
+        )
+        for item in imp_list:
             st.write(f"- {item}")
