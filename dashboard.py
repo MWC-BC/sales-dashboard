@@ -1,6 +1,6 @@
-print("STREAMLIT BOOTED")
 # -----------------------------------------------------------
 # dashboard.py  (clean Streamlit Cloud–safe version)
+print("STREAMLIT BOOTED")
 # -----------------------------------------------------------
 
 from pathlib import Path
