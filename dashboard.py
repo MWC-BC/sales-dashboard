@@ -1,29 +1,38 @@
 # -------------------------------------------------------------------
-# dashboard.py  (stable version: password gate + fixed date filters)
+# dashboard.py  – stable version
+#  - Password gate
+#  - Simple Altair charts (no overlays)
+#  - Date / Rep / Carrier / Call-type filters
 # -------------------------------------------------------------------
 
 from pathlib import Path
-from typing import List
 
-import numpy as np
-import pandas as pd
-import altair as alt
 import streamlit as st
+import pandas as pd
+import numpy as np
+import altair as alt
 
 # -------------------------------------------------------------------
 # PASSWORD GATE
 # -------------------------------------------------------------------
 def check_password() -> bool:
     """Simple password gate using Streamlit secrets."""
+
     def password_entered():
-        if st.session_state.get("password") == st.secrets["access"]["code"]:
+        code = st.secrets.get("access", {}).get("code")
+        if code is None:
+            # If secrets aren't set correctly, fail closed.
+            st.session_state["password_correct"] = False
+            return
+
+        if st.session_state["password"] == code:
             st.session_state["password_correct"] = True
-            # don't keep the password in session state
+            # We don't need to keep the password in session_state
             del st.session_state["password"]
         else:
             st.session_state["password_correct"] = False
 
-    # First run: ask for password
+    # First visit: ask for password
     if "password_correct" not in st.session_state:
         st.text_input(
             "Enter access code:",
@@ -33,7 +42,7 @@ def check_password() -> bool:
         )
         return False
 
-    # Wrong password entered previously
+    # Wrong password: ask again
     if not st.session_state["password_correct"]:
         st.text_input(
             "Enter access code:",
@@ -44,11 +53,11 @@ def check_password() -> bool:
         st.error("Incorrect access code.")
         return False
 
-    # Password correct
+    # Correct password
     return True
 
 
-# STOP app until password is correct
+# Stop app until password is correct
 if not check_password():
     st.stop()
 
@@ -68,76 +77,58 @@ BASE_DIR = Path(__file__).resolve().parent
 DATA_CSV = BASE_DIR / "Output" / "all_calls_recordings_enriched_CPD_coached.csv"
 
 # -------------------------------------------------------------------
-# LOAD DATA
+# LOAD + PREP DATA
 # -------------------------------------------------------------------
 @st.cache_data
-def load_data() -> pd.DataFrame:
-    df = pd.read_csv(DATA_CSV)
+def load_data(csv_path: Path) -> pd.DataFrame:
+    df = pd.read_csv(csv_path)
 
-    # -----------------------
-    # Intent column
-    # -----------------------
+    # --------- Intent column (unified) ----------
     if "intent" not in df.columns:
-        # fall back to LLM / rule intent
-        llm = df["llm_cpd_intent"] if "llm_cpd_intent" in df.columns else np.nan
-        rule = df["rule_intent"] if "rule_intent" in df.columns else np.nan
-        df["intent"] = llm.fillna(rule)
+        if "llm_cpd_intent" in df.columns or "rule_intent" in df.columns:
+            df["intent"] = df["llm_cpd_intent"].fillna(df.get("rule_intent"))
+        else:
+            df["intent"] = "Unknown"
+
     df["intent"] = df["intent"].fillna("Unknown").astype(str)
 
-    # -----------------------
-    # Sales rep
-    # -----------------------
+    # --------- Sales rep column ----------
     if "sales_rep" not in df.columns:
         df["sales_rep"] = "Unassigned"
-    else:
-        df["sales_rep"] = df["sales_rep"].fillna("Unassigned").astype(str)
+    df["sales_rep"] = df["sales_rep"].fillna("Unassigned").astype(str)
 
-    # -----------------------
-    # Provider (carrier)
-    # -----------------------
+    # --------- Provider / carrier ----------
     if "provider" in df.columns:
         df["provider"] = df["provider"].astype(str).str.title()
     else:
         df["provider"] = "Unknown"
 
-    # -----------------------
-    # Call datetime (make tz-naive so comparisons don't explode)
-    # -----------------------
-    if "call_datetime" in df.columns:
-        dt = pd.to_datetime(df["call_datetime"], utc=True, errors="coerce")
-        # remove timezone info -> naive datetime64[ns]
-        df["call_datetime"] = dt.dt.tz_localize(None)
-        df = df[df["call_datetime"].notna()]
-    else:
-        df["call_datetime"] = pd.NaT
+    # --------- Datetime ----------
+    df["call_datetime"] = pd.to_datetime(
+        df.get("call_datetime"),
+        errors="coerce"
+    )
 
-    # -----------------------
-    # Call type flags (voicemail, too short, no-answer)
-    # -----------------------
-    if "is_voicemail" not in df.columns:
-        df["is_voicemail"] = False
-    if "duration_seconds" not in df.columns:
-        # fall back to duration if present, else zero
-        if "duration" in df.columns:
-            df["duration_seconds"] = pd.to_numeric(df["duration"], errors="coerce").fillna(0)
-        else:
-            df["duration_seconds"] = 0
-    if "status" not in df.columns:
-        df["status"] = ""
+    # Make sure datetime is tz-naive to avoid comparison errors
+    if pd.api.types.is_datetime64tz_dtype(df["call_datetime"]):
+        df["call_datetime"] = df["call_datetime"].dt.tz_convert(None)
 
+    df = df[df["call_datetime"].notna()].copy()
+
+    # --------- Call type flags ----------
     df["call_type"] = "Standard"
-    df.loc[df["is_voicemail"] == True, "call_type"] = "Voicemail"
-    df.loc[df["duration_seconds"] < 1, "call_type"] = "Too Short"
-    df.loc[df["status"].astype(str).str.lower() == "no-answer", "call_type"] = "No Answer"
 
-    # -----------------------
-    # Coaching scores
-    # -----------------------
-    # Some pipelines use "coaching_total_sc" instead of "coaching_total_score"
-    if "coaching_total_score" not in df.columns and "coaching_total_sc" in df.columns:
-        df["coaching_total_score"] = df["coaching_total_sc"]
+    if "is_voicemail" in df.columns:
+        df.loc[df["is_voicemail"] == True, "call_type"] = "Voicemail"
 
-    score_cols: List[str] = [
+    if "duration_seconds" in df.columns:
+        df.loc[df["duration_seconds"] < 1, "call_type"] = "Too Short"
+
+    if "status" in df.columns:
+        df.loc[df["status"] == "no-answer", "call_type"] = "No Answer"
+
+    # --------- Coaching score columns ----------
+    score_cols = [
         "coaching_opening_score",
         "coaching_discovery_score",
         "coaching_value_score",
@@ -148,71 +139,42 @@ def load_data() -> pd.DataFrame:
         if col not in df.columns:
             df[col] = np.nan
 
-    # Ensure numeric
-    df[score_cols] = df[score_cols].apply(pd.to_numeric, errors="coerce")
-
-    # Text fields for coaching section
-    if "coaching_summary" not in df.columns:
-        df["coaching_summary"] = ""
+    # Ensure improvement text exists
     if "coaching_improvement_points" not in df.columns:
-        df["coaching_improvement_points"] = ""
-
-    if "transcript" not in df.columns:
-        df["transcript"] = ""
+        df["coaching_improvement_points"] = np.nan
 
     return df
 
 
-df = load_data()
-
-if df.empty:
-    st.error("No data available in the CSV. Please check the pipeline/export.")
-    st.stop()
+df = load_data(DATA_CSV)
 
 # -------------------------------------------------------------------
 # SIDEBAR FILTERS
 # -------------------------------------------------------------------
 st.sidebar.header("Filters")
 
-# ----- Date range -----
-min_dt = df["call_datetime"].min()
-max_dt = df["call_datetime"].max()
-
-# Use dates (not datetimes) for the widget
-min_date = min_dt.date()
-max_date = max_dt.date()
+# Date range
+min_date = df["call_datetime"].dt.date.min()
+max_date = df["call_datetime"].dt.date.max()
 
 date_range = st.sidebar.date_input(
     "Date Range",
-    (min_date, max_date),
+    [min_date, max_date],
 )
 
-# normalise what Streamlit returns (can be a date or list of dates)
-if isinstance(date_range, (list, tuple)):
-    if len(date_range) == 2:
-        start_date, end_date = date_range
-    elif len(date_range) == 1:
-        start_date = end_date = date_range[0]
-    else:
-        start_date = end_date = min_date
-else:
-    start_date = end_date = date_range
+# Normalise to timestamps (inclusive end-of-day)
+start = pd.to_datetime(date_range[0])
+end = pd.to_datetime(date_range[1]) + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
 
-start_ts = pd.to_datetime(start_date)
-# include full end day
-end_ts = pd.to_datetime(end_date) + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
-
-# ----- Sales rep filter -----
-rep_values = sorted(df["sales_rep"].dropna().unique().tolist())
-rep_options = ["All Reps"] + rep_values
+# Sales Rep filter
+rep_options = ["All Reps"] + sorted(df["sales_rep"].dropna().unique().tolist())
 selected_rep = st.sidebar.selectbox("Sales Rep", rep_options)
 
-# ----- Carrier filter -----
-carrier_values = sorted(df["provider"].dropna().unique().tolist())
-carrier_options = ["All"] + carrier_values
+# Carrier filter
+carrier_options = ["All"] + sorted(df["provider"].dropna().unique().tolist())
 selected_carrier = st.sidebar.selectbox("Carrier", carrier_options)
 
-# ----- Call type toggles -----
+# Call type toggles
 include_voicemail = st.sidebar.checkbox("Include Voicemail", True)
 include_no_answer = st.sidebar.checkbox("Include No Answer", True)
 include_too_short = st.sidebar.checkbox("Include Too Short (<1s)", True)
@@ -222,21 +184,21 @@ include_too_short = st.sidebar.checkbox("Include Too Short (<1s)", True)
 # -------------------------------------------------------------------
 filtered = df.copy()
 
-# Date range
+# Date filter
 filtered = filtered[
-    (filtered["call_datetime"] >= start_ts)
-    & (filtered["call_datetime"] <= end_ts)
+    (filtered["call_datetime"] >= start) &
+    (filtered["call_datetime"] <= end)
 ]
 
-# Carrier
+# Carrier filter
 if selected_carrier != "All":
     filtered = filtered[filtered["provider"] == selected_carrier]
 
-# Sales rep
+# Rep filter
 if selected_rep != "All Reps":
     filtered = filtered[filtered["sales_rep"] == selected_rep]
 
-# Call types
+# Call type exclusions
 exclude_types = []
 if not include_voicemail:
     exclude_types.append("Voicemail")
@@ -262,45 +224,39 @@ tab_intent, tab_coaching = st.tabs(["Buying Intent", "Coaching"])
 with tab_intent:
     st.subheader("Intent Overview")
 
-    total_calls = int(len(filtered))
-    distinct_intents = int(filtered["intent"].nunique())
+    total_calls = len(filtered)
+    distinct_intents = filtered["intent"].nunique()
 
     c1, c2 = st.columns(2)
-    c1.metric("Total Calls", total_calls)
-    c2.metric("Distinct CPD Intents", distinct_intents)
+    c1.metric("Total Calls", int(total_calls))
+    c2.metric("Distinct CPD Intents", int(distinct_intents))
 
-    if filtered.empty:
-        st.warning("No calls match the selected filters.")
+    # Intent distribution chart
+    intent_counts = (
+        filtered["intent"]
+        .fillna("Unknown")
+        .value_counts()
+        .reset_index()
+        .rename(columns={"index": "Intent", "intent": "Count"})
+    )
+
+    if intent_counts.empty:
+        st.info("No calls match the current filters.")
     else:
-        intent_counts = (
-            filtered["intent"]
-            .fillna("Unknown")
-            .value_counts()
-            .reset_index()
-            .rename(columns={"index": "intent", "intent": "count"})
+        base = (
+            alt.Chart(intent_counts)
+            .mark_bar()
+            .encode(
+                x=alt.X("Intent:N", title="Intent", sort="-y"),
+                y=alt.Y("Count:Q", title="Calls"),
+                tooltip=["Intent", "Count"],
+                color=alt.Color("Intent:N", legend=None),
+            )
+            .properties(height=350)
         )
 
-        base = alt.Chart(intent_counts)
-
-        bars = base.mark_bar().encode(
-            x=alt.X("intent:N", title="Intent"),
-            y=alt.Y("count:Q", title="Calls"),
-            color=alt.Color("intent:N", legend=None),
-            tooltip=["intent", "count"],
-        )
-
-        labels = base.mark_text(
-            align="center",
-            baseline="bottom",
-            dy=-5,
-            fontSize=13,
-        ).encode(
-            x="intent:N",
-            y="count:Q",
-            text="count:Q",
-        )
-
-        st.altair_chart(bars + labels, use_container_width=True)
+        # IMPORTANT: no overlay / mark_text combo – keep it simple + robust
+        st.altair_chart(base, use_container_width=True)
 
 # -------------------------------------------------------------------
 # COACHING TAB
@@ -322,66 +278,35 @@ with tab_coaching:
         st.warning("No coaching data for the selected filters.")
     else:
         avg_scores = coach_df.mean().reset_index()
-        avg_scores.columns = ["pillar", "score"]
-        avg_scores["score_rounded"] = avg_scores["score"].round(1)
+        avg_scores.columns = ["Pillar", "Score"]
 
-        base = alt.Chart(avg_scores)
-
-        bars = base.mark_bar().encode(
-            x=alt.X("pillar:N", title="Coaching Pillar"),
-            y=alt.Y("score:Q", title="Average Score (out of 5)"),
-            color=alt.Color("pillar:N", legend=None),
-            tooltip=["pillar", "score_rounded"],
+        bar = (
+            alt.Chart(avg_scores)
+            .mark_bar()
+            .encode(
+                x=alt.X("Pillar:N", title="Coaching Pillar"),
+                y=alt.Y("Score:Q", title="Average Score"),
+                tooltip=["Pillar", "Score"],
+                color=alt.Color("Pillar:N", legend=None),
+            )
+            .properties(height=350)
         )
 
-        labels = base.mark_text(
-            align="center",
-            baseline="bottom",
-            dy=-5,
-            fontSize=13,
-        ).encode(
-            x="pillar:N",
-            y="score:Q",
-            text="score_rounded:Q",
-        )
+        st.altair_chart(bar, use_container_width=True)
 
-        st.altair_chart(bars + labels, use_container_width=True)
-
-    # -------- Improvement bullets --------
+    # -------------- Improvement points list --------------
     st.subheader("Improvement Points")
+
     improvements = (
         filtered["coaching_improvement_points"]
         .dropna()
         .astype(str)
-        .str.strip()
+        .unique()
+        .tolist()
     )
-    improvements = improvements[improvements != ""]
 
-    if improvements.empty:
-        st.info("No coaching improvement points available for these filters.")
+    if not improvements:
+        st.info("No coaching improvement points available for the selected filters.")
     else:
-        for item in improvements.unique().tolist():
+        for item in improvements:
             st.write(f"- {item}")
-
-    # -------- Coaching call table --------
-    st.subheader("Coached Calls")
-
-    table_cols = [
-        "call_datetime",
-        "sales_rep",
-        "intent",
-        "coaching_summary",
-        "coaching_improvement_points",
-        "transcript",
-    ]
-    table_cols = [c for c in table_cols if c in filtered.columns]
-
-    if table_cols:
-        table_df = (
-            filtered[table_cols]
-            .sort_values("call_datetime", ascending=False)
-            .reset_index(drop=True)
-        )
-        st.dataframe(table_df, use_container_width=True, height=450)
-    else:
-        st.info("No detailed coaching columns available in this dataset.")
