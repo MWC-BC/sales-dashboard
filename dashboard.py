@@ -1,21 +1,24 @@
 # -------------------------------------------------------------------
-# dashboard.py  (working version with password gate + tz fix)
+# dashboard.py  (working version: password gate + fixed filters/charts)
 # -------------------------------------------------------------------
 
 from pathlib import Path
-import streamlit as st
-import pandas as pd
+from typing import List, Tuple
+
 import numpy as np
+import pandas as pd
 import altair as alt
+import streamlit as st
 
 # -------------------------------------------------------------------
 # PASSWORD GATE
 # -------------------------------------------------------------------
-def check_password():
+def check_password() -> bool:
     """Simple password gate using Streamlit secrets."""
     def password_entered():
         if st.session_state["password"] == st.secrets["access"]["code"]:
             st.session_state["password_correct"] = True
+            # remove the password from session state
             del st.session_state["password"]
         else:
             st.session_state["password_correct"] = False
@@ -53,6 +56,7 @@ st.set_page_config(
     page_title="Sales Call Coaching Dashboard",
     layout="wide",
 )
+
 alt.data_transformers.disable_max_rows()
 
 # -------------------------------------------------------------------
@@ -65,42 +69,38 @@ DATA_CSV = BASE_DIR / "Output" / "all_calls_recordings_enriched_CPD_coached.csv"
 # LOAD DATA
 # -------------------------------------------------------------------
 @st.cache_data
-def load_data() -> pd.DataFrame:
-    df = pd.read_csv(DATA_CSV)
+def load_data(path: Path) -> pd.DataFrame:
+    df = pd.read_csv(path)
 
-    # ----- intent column (unified) -----
+    # ---------- datetime ----------
+    # Normalize to timezone-naive and drop rows with invalid datetime
+    if "call_datetime" in df.columns:
+        dt = pd.to_datetime(df["call_datetime"], utc=True, errors="coerce")
+        # strip timezone info to avoid tz-naive / tz-aware comparison errors
+        df["call_datetime"] = dt.dt.tz_convert(None)
+        df = df[df["call_datetime"].notna()]
+    else:
+        df["call_datetime"] = pd.NaT
+
+    # ---------- intent ----------
     if "intent" not in df.columns:
-        df["intent"] = df.get("llm_cpd_intent")
-        if "rule_intent" in df.columns:
-            df["intent"] = df["intent"].fillna(df["rule_intent"])
-        df["intent"] = df["intent"].fillna("Unknown")
+        # prefer LLM intent, fall back to rule intent
+        df["intent"] = df.get("llm_cpd_intent", pd.Series(index=df.index))
+        df["intent"] = df["intent"].fillna(df.get("rule_intent", ""))
+    df["intent"] = df["intent"].fillna("Unknown").replace("", "Unknown")
 
-    # ----- sales_rep -----
+    # ---------- sales rep ----------
     if "sales_rep" not in df.columns:
         df["sales_rep"] = "Unassigned"
+    df["sales_rep"] = df["sales_rep"].fillna("Unassigned").astype(str)
 
-    # ----- provider (carrier) -----
+    # ---------- provider / carrier ----------
     if "provider" in df.columns:
         df["provider"] = df["provider"].astype(str).str.title()
     else:
         df["provider"] = "Unknown"
 
-    # ----- call_datetime (parse + strip timezone) -----
-    df["call_datetime"] = pd.to_datetime(df["call_datetime"], errors="coerce")
-
-    # If this is timezone-aware, drop the tz so comparisons work
-    try:
-        dtype = df["call_datetime"].dtype
-        tz = getattr(dtype, "tz", None)
-        if tz is not None:
-            df["call_datetime"] = df["call_datetime"].dt.tz_localize(None)
-    except (AttributeError, TypeError):
-        # Already tz-naive; nothing to do
-        pass
-
-    df = df[df["call_datetime"].notna()]
-
-    # ----- call_type -----
+    # ---------- call type ----------
     df["call_type"] = "Standard"
     if "is_voicemail" in df.columns:
         df.loc[df["is_voicemail"] == True, "call_type"] = "Voicemail"
@@ -109,7 +109,7 @@ def load_data() -> pd.DataFrame:
     if "status" in df.columns:
         df.loc[df["status"] == "no-answer", "call_type"] = "No Answer"
 
-    # ----- coaching score columns -----
+    # ---------- coaching scores ----------
     score_cols = [
         "coaching_opening_score",
         "coaching_discovery_score",
@@ -124,31 +124,42 @@ def load_data() -> pd.DataFrame:
     return df
 
 
-df = load_data()
+df = load_data(DATA_CSV)
 
 # -------------------------------------------------------------------
 # SIDEBAR FILTERS
 # -------------------------------------------------------------------
 st.sidebar.header("Filters")
 
-# Date range (use just the date objects)
-min_date = df["call_datetime"].min().date()
-max_date = df["call_datetime"].max().date()
+# ----- date range -----
+if df["call_datetime"].notna().any():
+    min_date = df["call_datetime"].dt.date.min()
+    max_date = df["call_datetime"].dt.date.max()
+else:
+    # fallback if something goes wrong
+    min_date = pd.to_datetime("2000-01-01").date()
+    max_date = pd.to_datetime("2000-01-01").date()
 
 date_range = st.sidebar.date_input(
     "Date Range",
     [min_date, max_date],
 )
 
-# Sales Rep filter
-rep_list = ["All Reps"] + sorted(df["sales_rep"].dropna().unique().tolist())
-selected_rep = st.sidebar.selectbox("Sales Rep", rep_list)
+# ----- sales rep filter -----
+unique_reps = sorted(
+    {r for r in df["sales_rep"].dropna().unique() if r != "Unassigned"}
+)
+rep_options: List[str] = ["All Reps"] + unique_reps
+if "Unassigned" in df["sales_rep"].values:
+    rep_options.append("Unassigned")
 
-# Carrier filter
-carrier_list = ["All", "Twilio", "Telzio"]
+selected_rep = st.sidebar.selectbox("Sales Rep", rep_options)
+
+# ----- carrier filter -----
+carrier_list = ["All"] + sorted(df["provider"].dropna().unique().tolist())
 selected_carrier = st.sidebar.selectbox("Carrier", carrier_list)
 
-# Call type toggles
+# ----- call type toggles -----
 include_voicemail = st.sidebar.checkbox("Include Voicemail", True)
 include_no_answer = st.sidebar.checkbox("Include No Answer", True)
 include_too_short = st.sidebar.checkbox("Include Too Short (<1s)", True)
@@ -158,13 +169,11 @@ include_too_short = st.sidebar.checkbox("Include Too Short (<1s)", True)
 # -------------------------------------------------------------------
 filtered = df.copy()
 
-# Date range filter (convert to pandas Timestamps – both tz-naive)
-start = pd.to_datetime(date_range[0])
-end = pd.to_datetime(date_range[1])
-
+# Date range – compare by DATE only (no tz problems)
+start_date, end_date = date_range
 filtered = filtered[
-    (filtered["call_datetime"] >= start)
-    & (filtered["call_datetime"] <= end)
+    (filtered["call_datetime"].dt.date >= start_date)
+    & (filtered["call_datetime"].dt.date <= end_date)
 ]
 
 # Carrier filter
@@ -176,7 +185,7 @@ if selected_rep != "All Reps":
     filtered = filtered[filtered["sales_rep"] == selected_rep]
 
 # Call type filters
-exclude_types: list[str] = []
+exclude_types: List[str] = []
 if not include_voicemail:
     exclude_types.append("Voicemail")
 if not include_no_answer:
@@ -198,7 +207,7 @@ st.write(
 tabs = st.tabs(["Buying Intent", "Coaching"])
 
 # -------------------------------------------------------------------
-# TAB 1: BUYING INTENT
+# BUYING INTENT TAB
 # -------------------------------------------------------------------
 with tabs[0]:
     st.subheader("Intent Overview")
@@ -207,73 +216,57 @@ with tabs[0]:
     distinct_intents = filtered["intent"].nunique()
 
     c1, c2 = st.columns(2)
-    c1.metric("Total Calls", total_calls)
-    c2.metric("Distinct CPD Intents", distinct_intents)
+    c1.metric("Total Calls", int(total_calls))
+    c2.metric("Distinct CPD Intents", int(distinct_intents))
 
-    # Intent distribution chart
+    # Intent distribution – avoid duplicate column names
     intent_counts = (
         filtered["intent"]
         .fillna("Unknown")
+        .replace("", "Unknown")
         .value_counts()
         .reset_index()
-        .rename(columns={"index": "intent", "intent": "count"})
     )
+    intent_counts.columns = ["intent", "call_count"]
 
-    if len(intent_counts) > 0:
-        chart = (
-            alt.Chart(intent_counts)
-            .mark_bar()
+    if not intent_counts.empty:
+        base = alt.Chart(intent_counts)
+
+        bars = (
+            base.mark_bar()
             .encode(
-                x="intent:N",
-                y="count:Q",
-                tooltip=["intent", "count"],
+                x=alt.X("intent:N", title="Intent"),
+                y=alt.Y("call_count:Q", title="Calls"),
+                tooltip=["intent", "call_count"],
                 color=alt.Color("intent:N", legend=None),
             )
         )
 
-        labels = chart.mark_text(
-            align="center",
-            baseline="bottom",
-            dy=-5,
-            fontSize=14,
-        ).encode(text="count:Q")
-
-        st.altair_chart(chart + labels, use_container_width=True)
-
-    # Simple call browser based on intent
-    st.subheader("Call Browser (Intent)")
-    filtered_sorted = filtered.sort_values("call_datetime", ascending=False)
-
-    if not filtered_sorted.empty:
-        options = (
-            filtered_sorted["call_datetime"].astype(str)
-            + " | "
-            + filtered_sorted["sales_rep"]
-            + " | "
-            + filtered_sorted["intent"]
+        labels = (
+            base.mark_text(
+                align="center",
+                baseline="bottom",
+                dy=-5,
+                fontSize=14,
+            )
+            .encode(
+                x="intent:N",
+                y="call_count:Q",
+                text="call_count:Q",
+            )
         )
-        selected = st.selectbox("Select a call:", options)
-        row = filtered_sorted.iloc[options.tolist().index(selected)]
 
-        left, right = st.columns(2)
-
-        with left:
-            st.markdown("### Intent Details")
-            st.write(f"**Intent:** {row['intent']}")
-            st.write(f"**LLM Reason:** {row.get('llm_cpd_reason', '')}")
-            st.write(f"**Rule Reason:** {row.get('rule_intent_reason', '')}")
-
-        with right:
-            st.markdown("### Transcript")
-            st.write(row.get("transcript", ""))
+        st.altair_chart(bars + labels, use_container_width=True)
+    else:
+        st.info("No calls match the selected filters.")
 
 # -------------------------------------------------------------------
-# TAB 2: COACHING
+# COACHING TAB
 # -------------------------------------------------------------------
 with tabs[1]:
-    st.subheader("Coaching Overview")
+    st.subheader("Coaching Scores")
 
-    score_cols = [
+    scoring_cols = [
         "coaching_opening_score",
         "coaching_discovery_score",
         "coaching_value_score",
@@ -281,39 +274,41 @@ with tabs[1]:
         "coaching_total_score",
     ]
 
-    scored = filtered.dropna(subset=["coaching_total_score"], how="all")
+    coach_df = filtered[scoring_cols].dropna(how="all")
 
-    if scored.empty:
-        st.warning("No coaching data in current filters.")
+    if coach_df.empty:
+        st.warning("No coaching data for selected filters.")
     else:
-        # Per-rep summary table
-        st.subheader("Per-Rep Coaching Summary")
-        rep_summary = scored.groupby("sales_rep")[score_cols].mean()
-        rep_summary["Calls Coached"] = scored.groupby("sales_rep").size()
-        st.dataframe(rep_summary.style.format("{:.2f}"), use_container_width=True)
+        avg_scores = coach_df.mean().reset_index()
+        avg_scores.columns = ["pillar", "score"]
 
-        # Side-by-side pillar chart by rep (no total)
-        st.subheader("Coaching Scores by Pillar (Side-by-Side by Rep)")
-        melted = scored.melt(
-            id_vars=["sales_rep"],
-            value_vars=score_cols[:-1],  # exclude total
-            var_name="Pillar",
-            value_name="Score",
+        base = alt.Chart(avg_scores)
+
+        bars = (
+            base.mark_bar()
+            .encode(
+                x=alt.X("pillar:N", title="Coaching Pillar"),
+                y=alt.Y("score:Q", title="Average Score"),
+                tooltip=["pillar", "score"],
+                color=alt.Color("pillar:N", legend=None),
+            )
         )
 
-        if not melted.empty:
-            pillar_chart = (
-                alt.Chart(melted)
-                .mark_bar()
-                .encode(
-                    x=alt.X("Pillar:N", title="Pillar"),
-                    y=alt.Y("Score:Q", title="Average Score"),
-                    color=alt.Color("sales_rep:N", title="Sales Rep"),
-                    column=alt.Column("sales_rep:N", title=None),
-                    tooltip=["sales_rep", "Pillar", "Score"],
-                )
+        labels = (
+            base.mark_text(
+                align="center",
+                baseline="bottom",
+                dy=-5,
+                fontSize=14,
             )
-            st.altair_chart(pillar_chart, use_container_width=True)
+            .encode(
+                x="pillar:N",
+                y="score:Q",
+                text="score:Q",
+            )
+        )
+
+        st.altair_chart(bars + labels, use_container_width=True)
 
     st.subheader("Improvement Points")
     if "coaching_improvement_points" in filtered.columns:
@@ -323,5 +318,10 @@ with tabs[1]:
             .astype(str)
             .tolist()
         )
-        for item in imp_list:
-            st.write(f"- {item}")
+        if not imp_list:
+            st.info("No coaching improvement points for selected filters.")
+        else:
+            for item in imp_list:
+                st.write(f"- {item}")
+    else:
+        st.info("No coaching improvement data in this dataset.")
