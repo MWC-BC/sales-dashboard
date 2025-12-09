@@ -1,6 +1,6 @@
 # -------------------------------------------------------------------
 # dashboard.py  – Sales Call Coaching Dashboard
-# Version: V3 – Streamlit Cloud Compatible (relative paths)
+# Version: V4 – Cloud-ready with CSV upload fallback
 # -------------------------------------------------------------------
 
 from pathlib import Path
@@ -88,15 +88,11 @@ st.markdown(
 )
 
 # -------------------------------------------------------------------
-# PATHS (LOCAL & CLOUD-FRIENDLY)
+# PATHS (LOCAL) & CONSTANTS
 # -------------------------------------------------------------------
 
 BASE_DIR = Path(__file__).resolve().parent
-
-# Local CSV location when you run on your machine
-DATA_CSV = BASE_DIR / "Output" / "all_calls_recordings_enriched_CPD_coached.csv"
-
-# Sales rep mapping CSV (safe to keep in repo)
+LOCAL_DATA_CSV = BASE_DIR / "Output" / "all_calls_recordings_enriched_CPD_coached.csv"
 MAPPING_CSV = BASE_DIR / "Config" / "sales_rep_phone_map.csv"
 
 # -------------------------------------------------------------------
@@ -230,17 +226,14 @@ def infer_rep_from_row(row, mapping_numbers, mapping_identities):
 
 
 # -------------------------------------------------------------------
-# LOAD DATA
+# DATA LOADING & PROCESSING
 # -------------------------------------------------------------------
 
 
-@st.cache_data(show_spinner=False)
-def load_data() -> pd.DataFrame:
-    # Try to load local CSV; if missing (e.g., in Streamlit Cloud), return empty df
-    try:
-        df = pd.read_csv(DATA_CSV)
-    except FileNotFoundError:
-        return pd.DataFrame()
+def process_raw_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Apply all the cleaning / enrichment steps used by the dashboard."""
+    if df.empty:
+        return df
 
     # Intent unification
     if "llm_cpd_intent" in df.columns:
@@ -294,13 +287,39 @@ def load_data() -> pd.DataFrame:
     return df
 
 
+def load_data() -> pd.DataFrame:
+    """
+    Load data for the dashboard.
+
+    - If the local CSV exists (your laptop / dev environment), use it.
+    - If not (Streamlit Cloud), ask the user to upload the enriched CSV.
+    """
+    if LOCAL_DATA_CSV.exists():
+        df_raw = pd.read_csv(LOCAL_DATA_CSV)
+        return process_raw_dataframe(df_raw)
+
+    st.info(
+        "No local data file found. Please upload "
+        "`all_calls_recordings_enriched_CPD_coached.csv` to use the dashboard."
+    )
+    uploaded = st.file_uploader(
+        "Upload enriched calls CSV", type=["csv"], accept_multiple_files=False
+    )
+    if uploaded is None:
+        # User hasn't uploaded anything yet
+        return pd.DataFrame()
+
+    df_raw = pd.read_csv(uploaded)
+    return process_raw_dataframe(df_raw)
+
+
 df_all = load_data()
 
 if df_all.empty:
     st.title("Sales Call Coaching Dashboard")
     st.warning(
-        "No calls found in the data file. "
-        "If you are running in Streamlit Cloud, the local CSV is not available yet."
+        "No calls found in the data file yet. "
+        "If you are running in Streamlit Cloud, upload the enriched CSV above."
     )
     st.stop()
 
@@ -440,7 +459,7 @@ with tab_intent:
             )
         )
 
-        st.altair_chart(alt.layer(bar, labels), use_container_width=True)
+        st.altair_chart(bar + labels, use_container_width=True)
 
     intent_cols = [
         "call_datetime",
