@@ -1,6 +1,6 @@
 # -------------------------------------------------------------------
 # dashboard.py  – Sales Call Coaching Dashboard
-# Version: V5 – Cloud-ready with OneDrive auto-loading + upload fallback
+# Version: V6 – Cloud-ready with Dropbox auto-loading + last-updated stamp
 # -------------------------------------------------------------------
 
 from pathlib import Path
@@ -273,7 +273,7 @@ def process_raw_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # -------------------------------------------------------------------
-# LOAD DATA (LOCAL → ONEDRIVE → UPLOAD)
+# LOAD DATA (LOCAL → DROPBOX → UPLOAD)
 # -------------------------------------------------------------------
 
 
@@ -281,7 +281,7 @@ def load_data() -> pd.DataFrame:
     """
     Order:
     1. Local CSV (your laptop)
-    2. OneDrive CSV via secrets
+    2. Dropbox CSV via secrets
     3. Upload fallback
     """
 
@@ -293,25 +293,25 @@ def load_data() -> pd.DataFrame:
         except Exception as e:
             st.error(f"Local CSV found but could not load: {e}")
 
-    # 2. ONEDRIVE (STREAMLIT CLOUD)
-    onedrive_url = None
+    # 2. DROPBOX (STREAMLIT CLOUD)
+    dropbox_url = None
     try:
         if "data" in st.secrets and "csv_url" in st.secrets["data"]:
-            onedrive_url = st.secrets["data"]["csv_url"]
+            dropbox_url = st.secrets["data"]["csv_url"]
     except Exception:
-        onedrive_url = None
+        dropbox_url = None
 
-    if onedrive_url:
-        st.info("Loading latest CSV from OneDrive…")
+    if dropbox_url:
+        st.info("Loading latest CSV from Dropbox…")
         try:
-            df_raw = pd.read_csv(onedrive_url)
+            df_raw = pd.read_csv(dropbox_url)
             df_proc = process_raw_dataframe(df_raw)
             if not df_proc.empty:
                 return df_proc
             else:
-                st.warning("OneDrive file loaded, but produced an empty dataset.")
+                st.warning("Dropbox file loaded, but produced an empty dataset.")
         except Exception as e:
-            st.error(f"Could not load CSV from OneDrive: {e}")
+            st.error(f"Could not load CSV from Dropbox: {e}")
 
     # 3. UPLOAD FALLBACK
     st.info("Please upload the enriched CSV to continue.")
@@ -339,8 +339,13 @@ df_all = load_data()
 
 if df_all.empty:
     st.title("Sales Call Coaching Dashboard")
-    st.warning("No calls found yet. Upload a CSV or check the OneDrive link.")
+    st.warning("No calls found yet. Upload a CSV or check the Dropbox link.")
     st.stop()
+
+# Global date range & last-updated info (based on call_datetime)
+global_min_dt = df_all["call_datetime"].min()
+global_max_dt = df_all["call_datetime"].max()
+last_updated = global_max_dt
 
 # -------------------------------------------------------------------
 # SIDEBAR FILTERS
@@ -409,7 +414,27 @@ if df.empty:
 # -------------------------------------------------------------------
 
 st.title("Sales Call Coaching Dashboard")
-st.caption("Use the sidebar to filter calls.")
+
+# Build a nice caption with date range + last updated
+if pd.notna(global_min_dt) and pd.notna(global_max_dt):
+    if global_min_dt.date() == global_max_dt.date():
+        date_span_text = f"Data for {global_min_dt.date():%Y-%m-%d}"
+    else:
+        date_span_text = (
+            f"Data from {global_min_dt.date():%Y-%m-%d} "
+            f"to {global_max_dt.date():%Y-%m-%d}"
+        )
+else:
+    date_span_text = "Data date range unavailable"
+
+if pd.notna(last_updated):
+    last_updated_text = last_updated.strftime("%Y-%m-%d %H:%M")
+    st.caption(
+        f"Use the sidebar to filter calls. {date_span_text}. "
+        f"Last updated: {last_updated_text} (based on latest call time)."
+    )
+else:
+    st.caption(f"Use the sidebar to filter calls. {date_span_text}.")
 
 tab_intent, tab_coaching = st.tabs(["Buying Intent", "Coaching"])
 
@@ -540,7 +565,11 @@ with tab_coaching:
     rep_labels = (
         alt.Chart(rep_avg)
         .mark_text(dy=-10, fontSize=18, fontWeight="bold")
-        .encode(x="sales_rep:N", y="AvgScore:Q", text=alt.Text("AvgScore:Q", format=".1f"))
+        .encode(
+            x="sales_rep:N",
+            y="AvgScore:Q",
+            text=alt.Text("AvgScore:Q", format=".1f"),
+        )
     )
 
     st.altair_chart(rep_bar + rep_labels, use_container_width=True)
@@ -558,7 +587,9 @@ with tab_coaching:
     pillar_df = pd.DataFrame(records)
 
     pillar_order = ["Opening", "Discovery", "Value", "Closing"]
-    pillar_df["Pillar"] = pd.Categorical(pillar_df["Pillar"], categories=pillar_order, ordered=True)
+    pillar_df["Pillar"] = pd.Categorical(
+        pillar_df["Pillar"], categories=pillar_order, ordered=True
+    )
 
     summary = (
         pillar_df.groupby(["sales_rep", "Pillar"], observed=False)["Score"]
@@ -581,7 +612,12 @@ with tab_coaching:
     labels = (
         alt.Chart(summary)
         .mark_text(dy=-12, fontWeight="bold", fontSize=18)
-        .encode(x="sales_rep:N", xOffset="Pillar:N", y="Score:Q", text=alt.Text("Score:Q", format=".1f"))
+        .encode(
+            x="sales_rep:N",
+            xOffset="Pillar:N",
+            y="Score:Q",
+            text=alt.Text("Score:Q", format=".1f"),
+        )
     )
 
     st.altair_chart(bars + labels, use_container_width=True)
