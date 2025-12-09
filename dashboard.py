@@ -1,6 +1,6 @@
 # -------------------------------------------------------------------
 # dashboard.py  – Sales Call Coaching Dashboard
-# Version: V7 – Dropbox auto-loading + Last Updated + Hide GitHub Link
+# Version: V8 – Dropbox auto-loading + Last Updated + Hide GitHub link everywhere
 # -------------------------------------------------------------------
 
 from pathlib import Path
@@ -10,6 +10,57 @@ import altair as alt
 import numpy as np
 import pandas as pd
 import streamlit as st
+
+# -------------------------------------------------------------------
+# STREAMLIT CONFIG & GLOBAL STYLING (APPLIES EVEN ON LOGIN PAGE)
+# -------------------------------------------------------------------
+
+st.set_page_config(
+    page_title="Sales Call Coaching Dashboard",
+    layout="wide",
+)
+
+alt.data_transformers.disable_max_rows()
+
+# Global font / layout styling
+st.markdown("""
+<style>
+    html, body, [class*="css"]  {
+        font-size: 20px !important;
+    }
+    h1 { font-size: 40px !important; }
+    h2, h3 { font-size: 30px !important; }
+    .stMetric label { font-size: 22px !important; }
+    .stMetric span { font-size: 28px !important; }
+    .stDataFrame table tbody tr td { font-size: 18px !important; }
+    .stDataFrame table thead tr th { font-size: 19px !important; }
+    .stSelectbox label, .stDateInput label {
+        font-size: 20px !important;
+    }
+    .stTabs [data-baseweb="tab"] { font-size: 22px !important; }
+</style>
+""", unsafe_allow_html=True)
+
+# Hide GitHub link / toolbar EVERYWHERE (login + main app)
+st.markdown("""
+<style>
+    /* Hide Streamlit's toolbar (where "View source" often lives) */
+    [data-testid="stToolbar"] {
+        display: none !important;
+    }
+
+    /* Hide any anchor that points to GitHub anywhere in the app */
+    a[href*="github.com"] {
+        display: none !important;
+    }
+
+    /* Extra safety: hide buttons or elements with GitHub in title/aria-label */
+    button[title*="GitHub"],
+    button[aria-label*="GitHub"] {
+        display: none !important;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 # -------------------------------------------------------------------
 # PASSWORD GATE
@@ -45,51 +96,11 @@ def check_password() -> bool:
 
     return True
 
+
 if not check_password():
+    # IMPORTANT: styling above has already executed, so the login page also
+    # has the GitHub link hidden.
     st.stop()
-
-# -------------------------------------------------------------------
-# STREAMLIT CONFIG & STYLING
-# -------------------------------------------------------------------
-
-st.set_page_config(
-    page_title="Sales Call Coaching Dashboard",
-    layout="wide",
-)
-
-alt.data_transformers.disable_max_rows()
-
-# Global styling
-st.markdown("""
-<style>
-    html, body, [class*="css"]  {
-        font-size: 20px !important;
-    }
-    h1 { font-size: 40px !important; }
-    h2, h3 { font-size: 30px !important; }
-    .stMetric label { font-size: 22px !important; }
-    .stMetric span { font-size: 28px !important; }
-    .stDataFrame table tbody tr td { font-size: 18px !important; }
-    .stDataFrame table thead tr th { font-size: 19px !important; }
-    .stSelectbox label, .stDateInput label {
-        font-size: 20px !important;
-    }
-    .stTabs [data-baseweb="tab"] { font-size: 22px !important; }
-</style>
-""", unsafe_allow_html=True)
-
-# Hide GitHub link / View source button
-st.markdown("""
-<style>
-    /* Hide the GitHub icon and "View source" link */
-    [data-testid="stToolbar"] {
-        display: none !important;
-    }
-    header a[href*="github"] {
-        display: none !important;
-    }
-</style>
-""", unsafe_allow_html=True)
 
 # -------------------------------------------------------------------
 # PATHS
@@ -131,6 +142,7 @@ def canonical_phone(num: Optional[Any]) -> Optional[str]:
 
     return digits
 
+
 def canonical_from_mapping(num: Optional[Any]) -> Optional[str]:
     if num is None:
         return None
@@ -146,6 +158,7 @@ def canonical_from_mapping(num: Optional[Any]) -> Optional[str]:
         if digits.startswith("1"):
             return digits
     return None
+
 
 def load_mapping(path: Path):
     mapping_numbers, mapping_identities = {}, {}
@@ -169,6 +182,7 @@ def load_mapping(path: Path):
 
     return mapping_numbers, mapping_identities
 
+
 def map_endpoint_to_rep(endpoint, mapping_numbers, mapping_identities):
     if endpoint is None or (isinstance(endpoint, float) and np.isnan(endpoint)):
         return None
@@ -178,6 +192,7 @@ def map_endpoint_to_rep(endpoint, mapping_numbers, mapping_identities):
     if canon:
         return mapping_numbers.get(canon)
     return None
+
 
 def infer_rep_from_row(row, mapping_numbers, mapping_identities):
     direction = str(row.get("direction", "")).lower()
@@ -200,6 +215,7 @@ def infer_rep_from_row(row, mapping_numbers, mapping_identities):
         return rep
     rep = map_endpoint_to_rep(raw_to, mapping_numbers, mapping_identities)
     return rep or "Unassigned"
+
 
 # -------------------------------------------------------------------
 # DATA PROCESSING
@@ -239,6 +255,7 @@ def process_raw_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     return df
+
 
 # -------------------------------------------------------------------
 # LOAD DATA (LOCAL → DROPBOX → UPLOAD)
@@ -287,6 +304,7 @@ def load_data() -> pd.DataFrame:
             st.error(f"Uploaded CSV could not be read: {e}")
 
     return pd.DataFrame()
+
 
 # -------------------------------------------------------------------
 # LOAD ALL DATA
@@ -371,7 +389,6 @@ if df.empty:
 
 st.title("Sales Call Coaching Dashboard")
 
-# Last updated caption
 if pd.notna(last_updated):
     st.caption(
         f"Use the sidebar to filter calls. Last updated: "
@@ -416,12 +433,15 @@ with tab_intent:
     labels = (
         alt.Chart(intent_counts)
         .mark_text(dy=-10, fontSize=18, fontWeight="bold")
-        .encode(x="Intent:N", y="Count:Q", text="Count:Q")
+        .encode(
+            x="Intent:N",
+            y="Count:Q",
+            text="Count:Q",
+        )
     )
 
     st.altair_chart(bar + labels, use_container_width=True)
 
-    # Table
     cols = [
         "call_datetime", "sales_rep", "provider",
         "intent", "llm_cpd_intent", "rule_intent", "call_type"
@@ -435,7 +455,6 @@ with tab_intent:
         use_container_width=True,
     )
 
-    # Detail view
     st.markdown("### Call Detail")
     df_sel = df.copy()
     df_sel["_label"] = (
@@ -498,13 +517,15 @@ with tab_coaching:
     labels = (
         alt.Chart(rep_avg)
         .mark_text(dy=-10, fontSize=18, fontWeight="bold")
-        .encode(x="sales_rep:N", y="AvgScore:Q",
-               text=alt.Text("AvgScore:Q", format=".1f"))
+        .encode(
+            x="sales_rep:N",
+            y="AvgScore:Q",
+            text=alt.Text("AvgScore:Q", format=".1f"),
+        )
     )
 
     st.altair_chart(bar + labels, use_container_width=True)
 
-    # Pillars
     st.markdown("### Pillar Breakdown")
 
     records = []
@@ -559,7 +580,6 @@ with tab_coaching:
 
     st.altair_chart(bar + labels, use_container_width=True)
 
-    # Table
     st.markdown("### Coaching View — Calls")
 
     call_cols = [
@@ -574,7 +594,6 @@ with tab_coaching:
         "coaching_closing_score",
         "call_type",
     ]
-
     call_cols = [c for c in call_cols if c in df_coached.columns]
 
     st.dataframe(
@@ -583,7 +602,6 @@ with tab_coaching:
         use_container_width=True,
     )
 
-    # Coaching detail
     st.markdown("### Coaching Detail")
 
     df_det = df_coached.copy()
@@ -594,16 +612,16 @@ with tab_coaching:
     )
 
     chosen2 = st.selectbox("Select a coached call", df_det["_label"])
-    row = df_det[df_det["_label"] == chosen2].iloc[0]
+    row_c = df_det[df_det["_label"] == chosen2].iloc[0]
 
     col1, col2 = st.columns(2)
 
     with col1:
         st.markdown("#### Coaching Summary")
-        st.write(row.get("coaching_summary", ""))
+        st.write(row_c.get("coaching_summary", ""))
 
         st.markdown("#### Improvement Points")
-        imp = row.get("coaching_improvement_points", "")
+        imp = row_c.get("coaching_improvement_points", "")
         if isinstance(imp, str) and imp.strip():
             for line in imp.split("\n"):
                 line = line.strip()
@@ -613,12 +631,12 @@ with tab_coaching:
             st.write("No improvement points provided.")
 
         st.markdown("#### Scores")
-        st.write(f"**Total:** {row.get('coaching_total_score', '')}")
-        st.write(f"**Opening:** {row.get('coaching_opening_score', '')}")
-        st.write(f"**Discovery:** {row.get('coaching_discovery_score', '')}")
-        st.write(f"**Value:** {row.get('coaching_value_score', '')}")
-        st.write(f"**Closing:** {row.get('coaching_closing_score', '')}")
+        st.write(f"**Total:** {row_c.get('coaching_total_score', '')}")
+        st.write(f"**Opening:** {row_c.get('coaching_opening_score', '')}")
+        st.write(f"**Discovery:** {row_c.get('coaching_discovery_score', '')}")
+        st.write(f"**Value:** {row_c.get('coaching_value_score', '')}")
+        st.write(f"**Closing:** {row_c.get('coaching_closing_score', '')}")
 
     with col2:
         st.markdown("#### Transcript")
-        st.write(row.get("transcript", ""))
+        st.write(row_c.get("transcript", ""))
