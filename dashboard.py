@@ -1,55 +1,44 @@
 # -------------------------------------------------------------------
-# dashboard.py  – stable version for Streamlit Cloud
-#  - Password gate (secrets: [access] code = "...")
-#  - Date / Rep / Carrier / Call-type filters
-#  - Buying Intent chart
-#  - Coaching scores + improvement points
+# dashboard.py  – Sales Call Coaching Dashboard
+# Version: V3 – Streamlit Cloud Compatible (relative paths)
 # -------------------------------------------------------------------
 
 from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
 
-import streamlit as st
-import pandas as pd
-import numpy as np
 import altair as alt
-
-# -------------------------------------------------------------------
-# STREAMLIT CONFIG  (must be first Streamlit command)
-# -------------------------------------------------------------------
-st.set_page_config(
-    page_title="Sales Call Coaching Dashboard",
-    layout="wide",
-)
-alt.data_transformers.disable_max_rows()
+import numpy as np
+import pandas as pd
+import streamlit as st
 
 # -------------------------------------------------------------------
 # PASSWORD GATE
 # -------------------------------------------------------------------
+
 def check_password() -> bool:
-    """Simple password gate using Streamlit secrets."""
+    """Simple password gate using Streamlit secrets (access.code)."""
+
     def password_entered():
         correct = st.session_state.get("password") == st.secrets["access"]["code"]
-        st.session_state["password_correct"] = correct
-        # Clear the password from session state for safety
-        st.session_state["password"] = ""
+        st.session_state["password_correct"] = bool(correct)
+        if "password" in st.session_state:
+            del st.session_state["password"]
 
-    # First run: ask for password
     if "password_correct" not in st.session_state:
         st.text_input(
             "Enter access code:",
             type="password",
-            on_change=password_entered,
             key="password",
+            on_change=password_entered,
         )
         return False
 
-    # If password was incorrect, ask again
     if not st.session_state["password_correct"]:
         st.text_input(
             "Enter access code:",
             type="password",
-            on_change=password_entered,
             key="password",
+            on_change=password_entered,
         )
         st.error("Incorrect access code.")
         return False
@@ -57,275 +46,216 @@ def check_password() -> bool:
     return True
 
 
-# Stop app here until password is correct
 if not check_password():
     st.stop()
 
 # -------------------------------------------------------------------
-# PATHS
+# STREAMLIT CONFIG & STYLING
 # -------------------------------------------------------------------
-BASE_DIR = Path(__file__).resolve().parent
-DATA_CSV = BASE_DIR / "Output" / "all_calls_recordings_enriched_CPD_coached.csv"
+
+st.set_page_config(
+    page_title="Sales Call Coaching Dashboard",
+    layout="wide",
+)
+
+alt.data_transformers.disable_max_rows()
+
+st.markdown(
+    """
+    <style>
+        html, body, [class*="css"]  {
+            font-size: 20px !important;
+        }
+
+        h1 { font-size: 40px !important; }
+        h2, h3 { font-size: 30px !important; }
+
+        .stMetric label { font-size: 22px !important; }
+        .stMetric span { font-size: 28px !important; }
+
+        .stDataFrame table tbody tr td { font-size: 18px !important; }
+        .stDataFrame table thead tr th { font-size: 19px !important; }
+
+        .stSelectbox label, .stDateInput label {
+            font-size: 20px !important;
+        }
+
+        .stTabs [data-baseweb="tab"] { font-size: 22px !important; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 # -------------------------------------------------------------------
-# LOAD & CLEAN DATA
+# PATHS — REWRITTEN FOR STREAMLIT CLOUD
 # -------------------------------------------------------------------
-@st.cache_data
+
+BASE_DIR = Path(__file__).resolve().parent
+
+# This is where your CSV MUST exist in GitHub for Streamlit Cloud:
+DATA_CSV = BASE_DIR / "Output" / "all_calls_recordings_enriched_CPD_coached.csv"
+
+# Local mapping CSV
+MAPPING_CSV = BASE_DIR / "Config" / "sales_rep_phone_map.csv"
+
+# Validation (Cloud-friendly messaging)
+if not DATA_CSV.exists():
+    st.error(f"❌ Missing data file:\n`{DATA_CSV}`\n\nUpload it to your GitHub repo exactly in this location.")
+    st.stop()
+
+if not MAPPING_CSV.exists():
+    st.warning(f"⚠️ Mapping file not found at `{MAPPING_CSV}` — reps may show as Unassigned.")
+
+# -------------------------------------------------------------------
+# PHONE / IDENTITY HELPERS
+# -------------------------------------------------------------------
+
+def canonical_phone(num: Optional[Any]) -> Optional[str]:
+    """Normalize phone numbers into canonical 1XXXXXXXXXX format."""
+    if num is None or (isinstance(num, float) and np.isnan(num)):
+        return None
+
+    if isinstance(num, (int, np.integer)):
+        digits = str(int(num))
+    elif isinstance(num, (float, np.floating)):
+        digits = str(int(num))
+    else:
+        s = str(num)
+        if s.startswith("client:"):
+            return None
+        digits = "".join(ch for ch in s if ch.isdigit())
+
+    if not digits:
+        return None
+
+    if len(digits) == 11 and digits.startswith("1"):
+        return digits
+    if len(digits) == 10:
+        return "1" + digits
+    if len(digits) > 11:
+        digits = digits[-11:]
+        if len(digits) == 11 and digits.startswith("1"):
+            return digits
+    if len(digits) < 10:
+        return None
+
+    return digits
+
+
+def canonical_from_mapping(num: Optional[Any]) -> Optional[str]:
+    """Normalize phone numbers from mapping CSV."""
+    if num is None:
+        return None
+
+    digits = "".join(ch for ch in str(num) if ch.isdigit())
+    if not digits:
+        return None
+
+    if len(digits) == 11 and digits.startswith("1"):
+        return digits
+    if len(digits) == 10:
+        return "1" + digits
+    if len(digits) > 11:
+        digits = digits[-11:]
+        if len(digits) == 11 and digits.startswith("1"):
+            return digits
+    if len(digits) < 10:
+        return None
+
+    return digits
+
+
+def load_mapping(path: Path) -> Tuple[Dict[str, str], Dict[str, str]]:
+    mapping_numbers: Dict[str, str] = {}
+    mapping_identities: Dict[str, str] = {}
+
+    if not path.exists():
+        return mapping_numbers, mapping_identities
+
+    df_map = pd.read_csv(path)
+    has_identity = "identity" in df_map.columns
+
+    for _, r in df_map.iterrows():
+        rep = str(r["sales_rep"]).strip()
+
+        canon = canonical_from_mapping(r["phone_number"])
+        if canon:
+            mapping_numbers[canon] = rep
+
+        if has_identity:
+            ident = r.get("identity")
+            if isinstance(ident, str) and ident.strip():
+                mapping_identities[ident.strip()] = rep
+
+    return mapping_numbers, mapping_identities
+
+
+def map_endpoint_to_rep(endpoint: Any, mapping_numbers, mapping_identities):
+    if endpoint is None or (isinstance(endpoint, float) and np.isnan(endpoint)):
+        return None
+
+    if isinstance(endpoint, str) and endpoint.startswith("client:"):
+        return mapping_identities.get(endpoint.strip())
+
+    canon = canonical_phone(endpoint)
+    if canon:
+        return mapping_numbers.get(canon)
+
+    return None
+
+
+def infer_rep_from_row(row, mapping_numbers, mapping_identities):
+    direction_business = str(row.get("direction_business", "") or "").lower()
+    direction = str(row.get("direction", "") or "").lower()
+
+    raw_from = row.get("from")
+    raw_to = row.get("to")
+
+    if "twilio dialer" in direction_business:
+        primary = raw_from
+        secondary = raw_to
+    elif "outbound" in direction:
+        primary = raw_from
+        secondary = raw_to
+    elif "inbound" in direction:
+        primary = raw_to
+        secondary = raw_from
+    else:
+        primary = raw_from
+        secondary = raw_to
+
+    rep = map_endpoint_to_rep(primary, mapping_numbers, mapping_identities)
+    if rep:
+        return rep
+
+    rep = map_endpoint_to_rep(secondary, mapping_numbers, mapping_identities)
+    if rep:
+        return rep
+
+    return "Unassigned"
+
+# -------------------------------------------------------------------
+# LOAD DATA
+# -------------------------------------------------------------------
+
+@st.cache_data(show_spinner=False)
 def load_data() -> pd.DataFrame:
     df = pd.read_csv(DATA_CSV)
 
-    # ---------- DATETIME ----------
-    if "call_datetime" in df.columns:
-        # Parse as UTC then drop tz to ensure *naive* timestamps
-        dt = pd.to_datetime(df["call_datetime"], errors="coerce", utc=True)
-        df["call_datetime"] = dt.dt.tz_localize(None)
-        df = df[df["call_datetime"].notna()]
+    # Intent unification
+    if "llm_cpd_intent" in df.columns:
+        df["intent"] = df["llm_cpd_intent"].fillna(df.get("rule_intent"))
     else:
-        # If somehow missing, create a dummy column so the app still runs
-        df["call_datetime"] = pd.Timestamp.now()
+        df["intent"] = df.get("rule_intent")
+    df["intent"] = df["intent"].fillna("unknown")
 
-    # ---------- INTENT ----------
-    if "intent" not in df.columns:
-        # Fallback: combine llm + rule intent
-        base_intent = df.get("llm_cpd_intent", pd.Series(index=df.index))
-        rule_intent = df.get("rule_intent", pd.Series(index=df.index))
-        df["intent"] = base_intent.fillna(rule_intent)
-    df["intent"] = df["intent"].fillna("Unknown").astype(str)
+    # Provider
+    df["provider"] = df.get("provider", "Unknown").astype(str).str.title()
 
-    # ---------- SALES REP ----------
-    if "sales_rep" not in df.columns:
-        df["sales_rep"] = "Unassigned"
-    df["sales_rep"] = df["sales_rep"].fillna("Unassigned").astype(str)
+    # Datetime
+    df["call_datetime"] = pd.to_datetime(df.get("call_datetime"), errors="coerce")
+    df = df[df["call_datetime"].notna()].copy()
 
-    # ---------- PROVIDER / CARRIER ----------
-    if "provider" not in df.columns:
-        df["provider"] = "Unknown"
-    df["provider"] = df["provider"].fillna("Unknown").astype(str).str.title()
-
-    # ---------- CALL TYPE ----------
+    # Call type
     df["call_type"] = "Standard"
-    if "is_voicemail" in df.columns:
-        df.loc[df["is_voicemail"] == True, "call_type"] = "Voicemail"
-    if "duration_seconds" in df.columns:
-        df.loc[df["duration_seconds"] < 1, "call_type"] = "Too Short"
-    if "status" in df.columns:
-        df.loc[df["status"] == "no-answer", "call_type"] = "No Answer"
-
-    # ---------- COACHING SCORES ----------
-    score_cols = [
-        "coaching_opening_score",
-        "coaching_discovery_score",
-        "coaching_value_score",
-        "coaching_closing_score",
-        "coaching_total_score",
-    ]
-    for c in score_cols:
-        if c not in df.columns:
-            df[c] = np.nan
-
-    # ---------- TEXT FIELDS ----------
-    for col in [
-        "coaching_summary",
-        "coaching_improvement_points",
-        "transcript",
-    ]:
-        if col in df.columns:
-            df[col] = df[col].astype(str)
-
-    return df
-
-
-df = load_data()
-
-# -------------------------------------------------------------------
-# SIDEBAR FILTERS
-# -------------------------------------------------------------------
-st.sidebar.header("Filters")
-
-# Date range
-min_dt = df["call_datetime"].min()
-max_dt = df["call_datetime"].max()
-default_start = min_dt.date() if not pd.isna(min_dt) else pd.Timestamp.now().date()
-default_end = max_dt.date() if not pd.isna(max_dt) else pd.Timestamp.now().date()
-
-date_range = st.sidebar.date_input(
-    "Date Range",
-    [default_start, default_end],
-)
-
-# Sales Rep filter
-rep_options = sorted(df["sales_rep"].dropna().unique().tolist())
-rep_list = ["All Reps"] + rep_options
-selected_rep = st.sidebar.selectbox("Sales Rep", rep_list)
-
-# Carrier filter (use actual providers present)
-provider_options = sorted(df["provider"].dropna().unique().tolist())
-carrier_list = ["All"] + provider_options
-selected_carrier = st.sidebar.selectbox("Carrier", carrier_list)
-
-# Call type toggles
-include_voicemail = st.sidebar.checkbox("Include Voicemail", True)
-include_no_answer = st.sidebar.checkbox("Include No Answer", True)
-include_too_short = st.sidebar.checkbox("Include Too Short (<1s)", True)
-
-# -------------------------------------------------------------------
-# APPLY FILTERS
-# -------------------------------------------------------------------
-filtered = df.copy()
-
-# Date range filter
-if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
-    start = pd.to_datetime(date_range[0])
-    end = pd.to_datetime(date_range[1]) + pd.Timedelta(days=1)
-    filtered = filtered[
-        (filtered["call_datetime"] >= start)
-        & (filtered["call_datetime"] < end)
-    ]
-
-# Carrier filter
-if selected_carrier != "All":
-    filtered = filtered[filtered["provider"] == selected_carrier]
-
-# Rep filter
-if selected_rep != "All Reps":
-    filtered = filtered[filtered["sales_rep"] == selected_rep]
-
-# Call type filters
-exclude_types = []
-if not include_voicemail:
-    exclude_types.append("Voicemail")
-if not include_no_answer:
-    exclude_types.append("No Answer")
-if not include_too_short:
-    exclude_types.append("Too Short")
-
-if exclude_types:
-    filtered = filtered[~filtered["call_type"].isin(exclude_types)]
-
-# -------------------------------------------------------------------
-# PAGE HEADER
-# -------------------------------------------------------------------
-st.title("Sales Call Coaching Dashboard")
-st.write("Use the sidebar to filter by Sales Rep, date range, carrier, and call type.")
-
-tabs = st.tabs(["Buying Intent", "Coaching"])
-
-# -------------------------------------------------------------------
-# BUYING INTENT TAB
-# -------------------------------------------------------------------
-with tabs[0]:
-    st.subheader("Intent Overview")
-
-    total_calls = len(filtered)
-    distinct_intents = filtered["intent"].nunique()
-
-    c1, c2 = st.columns(2)
-    c1.metric("Total Calls", total_calls)
-    c2.metric("Distinct CPD Intents", distinct_intents)
-
-    # Intent distribution
-    if total_calls == 0:
-        st.warning("No calls match the selected filters.")
-    else:
-        intent_counts = (
-            filtered["intent"]
-            .fillna("Unknown")
-            .value_counts()
-            .reset_index()
-        )
-        intent_counts.columns = ["intent", "count"]
-
-        base = (
-            alt.Chart(intent_counts)
-            .mark_bar()
-            .encode(
-                x=alt.X("intent:N", title="Intent", sort="-y"),
-                y=alt.Y("count:Q", title="Calls"),
-                tooltip=["intent", "count"],
-                color=alt.Color("intent:N", legend=None),
-            )
-            .properties(height=350)
-        )
-
-        st.altair_chart(base, use_container_width=True)
-
-# -------------------------------------------------------------------
-# COACHING TAB
-# -------------------------------------------------------------------
-with tabs[1]:
-    st.subheader("Coaching Scores")
-
-    scoring_cols = [
-        "coaching_opening_score",
-        "coaching_discovery_score",
-        "coaching_value_score",
-        "coaching_closing_score",
-        "coaching_total_score",
-    ]
-
-    coach_df = filtered[scoring_cols].dropna(how="all")
-
-    if coach_df.empty:
-        st.warning("No coaching data for selected filters.")
-    else:
-        avg_scores = coach_df.mean().reset_index()
-        avg_scores.columns = ["pillar", "score"]
-
-        label_map = {
-            "coaching_opening_score": "Opening",
-            "coaching_discovery_score": "Discovery",
-            "coaching_value_score": "Value",
-            "coaching_closing_score": "Closing",
-            "coaching_total_score": "Total",
-        }
-        avg_scores["pillar_label"] = avg_scores["pillar"].map(label_map)
-
-        bar = (
-            alt.Chart(avg_scores)
-            .mark_bar()
-            .encode(
-                x=alt.X("pillar_label:N", title="Coaching Pillar"),
-                y=alt.Y("score:Q", title="Average Score"),
-                tooltip=["pillar_label", "score"],
-                color=alt.Color("pillar_label:N", legend=None),
-            )
-            .properties(height=350)
-        )
-
-        st.altair_chart(bar, use_container_width=True)
-
-    # ----- Improvement Points -----
-    st.subheader("Improvement Points")
-    if "coaching_improvement_points" in filtered.columns:
-        points = (
-            filtered["coaching_improvement_points"]
-            .dropna()
-            .astype(str)
-            .unique()
-            .tolist()
-        )
-        if not points:
-            st.write("No improvement points available for the selected filters.")
-        else:
-            for item in points:
-                st.write(f"- {item}")
-
-    # ----- Optional: Call-level table -----
-    st.subheader("Call-Level Coaching Details")
-    detail_cols = [
-        "call_datetime",
-        "sales_rep",
-        "intent",
-        "coaching_summary",
-        "coaching_improvement_points",
-    ]
-    detail_cols = [c for c in detail_cols if c in filtered.columns]
-
-    if detail_cols:
-        st.dataframe(
-            filtered[detail_cols].sort_values("call_datetime", ascending=False),
-            use_container_width=True,
-            hide_index=True,
-        )
-    else:
-        st.write("No detailed coaching columns available.")
+    if "is_v_
