@@ -1,6 +1,6 @@
 # -------------------------------------------------------------------
 # dashboard.py  – Sales Call Coaching Dashboard
-# Version: V6 – Cloud-ready with Dropbox auto-loading + last-updated stamp
+# Version: V7 – Dropbox auto-loading + Last Updated + Hide GitHub Link
 # -------------------------------------------------------------------
 
 from pathlib import Path
@@ -14,7 +14,6 @@ import streamlit as st
 # -------------------------------------------------------------------
 # PASSWORD GATE
 # -------------------------------------------------------------------
-
 
 def check_password() -> bool:
     """Simple password gate using Streamlit secrets (access.code)."""
@@ -46,7 +45,6 @@ def check_password() -> bool:
 
     return True
 
-
 if not check_password():
     st.stop()
 
@@ -61,31 +59,37 @@ st.set_page_config(
 
 alt.data_transformers.disable_max_rows()
 
-st.markdown(
-    """
-    <style>
-        html, body, [class*="css"]  {
-            font-size: 20px !important;
-        }
+# Global styling
+st.markdown("""
+<style>
+    html, body, [class*="css"]  {
+        font-size: 20px !important;
+    }
+    h1 { font-size: 40px !important; }
+    h2, h3 { font-size: 30px !important; }
+    .stMetric label { font-size: 22px !important; }
+    .stMetric span { font-size: 28px !important; }
+    .stDataFrame table tbody tr td { font-size: 18px !important; }
+    .stDataFrame table thead tr th { font-size: 19px !important; }
+    .stSelectbox label, .stDateInput label {
+        font-size: 20px !important;
+    }
+    .stTabs [data-baseweb="tab"] { font-size: 22px !important; }
+</style>
+""", unsafe_allow_html=True)
 
-        h1 { font-size: 40px !important; }
-        h2, h3 { font-size: 30px !important; }
-
-        .stMetric label { font-size: 22px !important; }
-        .stMetric span { font-size: 28px !important; }
-
-        .stDataFrame table tbody tr td { font-size: 18px !important; }
-        .stDataFrame table thead tr th { font-size: 19px !important; }
-
-        .stSelectbox label, .stDateInput label {
-            font-size: 20px !important;
-        }
-
-        .stTabs [data-baseweb="tab"] { font-size: 22px !important; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+# Hide GitHub link / View source button
+st.markdown("""
+<style>
+    /* Hide the GitHub icon and "View source" link */
+    [data-testid="stToolbar"] {
+        display: none !important;
+    }
+    header a[href*="github"] {
+        display: none !important;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 # -------------------------------------------------------------------
 # PATHS
@@ -99,18 +103,13 @@ MAPPING_CSV = BASE_DIR / "Config" / "sales_rep_phone_map.csv"
 # PHONE / IDENTITY HELPERS
 # -------------------------------------------------------------------
 
-
 def canonical_phone(num: Optional[Any]) -> Optional[str]:
-    """Normalize phone numbers into canonical 1XXXXXXXXXX format."""
     if num is None or (isinstance(num, float) and np.isnan(num)):
         return None
-
     if isinstance(num, (int, np.integer)):
         digits = str(int(num))
-
     elif isinstance(num, (float, np.floating)):
         digits = str(int(num))
-
     else:
         s = str(num)
         if s.startswith("client:"):
@@ -119,7 +118,6 @@ def canonical_phone(num: Optional[Any]) -> Optional[str]:
 
     if not digits:
         return None
-
     if len(digits) == 11 and digits.startswith("1"):
         return digits
     if len(digits) == 10:
@@ -133,15 +131,12 @@ def canonical_phone(num: Optional[Any]) -> Optional[str]:
 
     return digits
 
-
 def canonical_from_mapping(num: Optional[Any]) -> Optional[str]:
     if num is None:
         return None
-
     digits = "".join(ch for ch in str(num) if ch.isdigit())
     if not digits:
         return None
-
     if len(digits) == 11 and digits.startswith("1"):
         return digits
     if len(digits) == 10:
@@ -152,10 +147,8 @@ def canonical_from_mapping(num: Optional[Any]) -> Optional[str]:
             return digits
     return None
 
-
-def load_mapping(path: Path) -> Tuple[Dict[str, str], Dict[str, str]]:
+def load_mapping(path: Path):
     mapping_numbers, mapping_identities = {}, {}
-
     if not path.exists():
         return mapping_numbers, mapping_identities
 
@@ -165,12 +158,10 @@ def load_mapping(path: Path) -> Tuple[Dict[str, str], Dict[str, str]]:
     for _, r in df_map.iterrows():
         rep = str(r["sales_rep"]).strip()
 
-        # phone mapping
         canon = canonical_from_mapping(r["phone_number"])
         if canon:
             mapping_numbers[canon] = rep
 
-        # softphone identity mapping
         if has_identity:
             ident = r.get("identity")
             if isinstance(ident, str) and ident.strip():
@@ -178,20 +169,15 @@ def load_mapping(path: Path) -> Tuple[Dict[str, str], Dict[str, str]]:
 
     return mapping_numbers, mapping_identities
 
-
-def map_endpoint_to_rep(endpoint: Any, mapping_numbers, mapping_identities):
+def map_endpoint_to_rep(endpoint, mapping_numbers, mapping_identities):
     if endpoint is None or (isinstance(endpoint, float) and np.isnan(endpoint)):
         return None
-
     if isinstance(endpoint, str) and endpoint.startswith("client:"):
         return mapping_identities.get(endpoint.strip())
-
     canon = canonical_phone(endpoint)
     if canon:
         return mapping_numbers.get(canon)
-
     return None
-
 
 def infer_rep_from_row(row, mapping_numbers, mapping_identities):
     direction = str(row.get("direction", "")).lower()
@@ -212,57 +198,40 @@ def infer_rep_from_row(row, mapping_numbers, mapping_identities):
     rep = map_endpoint_to_rep(primary, mapping_numbers, mapping_identities)
     if rep:
         return rep
-
-    # fallback: try the other endpoint
     rep = map_endpoint_to_rep(raw_to, mapping_numbers, mapping_identities)
     return rep or "Unassigned"
 
-
 # -------------------------------------------------------------------
-# PROCESS RAW DATA
+# DATA PROCESSING
 # -------------------------------------------------------------------
-
 
 def process_raw_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
 
-    # Intent unification
-    df["intent"] = df.get("llm_cpd_intent", df.get("rule_intent"))
-    df["intent"] = df["intent"].fillna("unknown")
-
-    # Provider
+    df["intent"] = df.get("llm_cpd_intent", df.get("rule_intent")).fillna("unknown")
     df["provider"] = df.get("provider", "Unknown").astype(str).str.title()
-
-    # call datetime
     df["call_datetime"] = pd.to_datetime(df.get("call_datetime"), errors="coerce")
     df = df[df["call_datetime"].notna()].copy()
 
-    # Call type
     df["call_type"] = "Standard"
     if "is_voicemail" in df.columns:
         df.loc[df["is_voicemail"] == True, "call_type"] = "Voicemail"
-
     if "status" in df.columns:
         df.loc[df["status"].astype(str).str.lower() == "no-answer", "call_type"] = "No Answer"
 
-    # Too-short
     dur = pd.to_numeric(df.get("duration_seconds", df.get("duration")), errors="coerce")
     df.loc[dur < 1, "call_type"] = "Too Short"
 
-    # Coaching fields
-    score_cols = [
+    for c in [
         "coaching_opening_score",
         "coaching_discovery_score",
         "coaching_value_score",
         "coaching_closing_score",
         "coaching_total_score",
-    ]
+    ]:
+        df[c] = pd.to_numeric(df.get(c), errors="coerce")
 
-    for col in score_cols:
-        df[col] = pd.to_numeric(df.get(col), errors="coerce")
-
-    # Sales rep mapping
     mapping_numbers, mapping_identities = load_mapping(MAPPING_CSV)
     df["sales_rep"] = df.apply(
         lambda r: infer_rep_from_row(r, mapping_numbers, mapping_identities),
@@ -271,21 +240,13 @@ def process_raw_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
-
 # -------------------------------------------------------------------
 # LOAD DATA (LOCAL → DROPBOX → UPLOAD)
 # -------------------------------------------------------------------
 
-
 def load_data() -> pd.DataFrame:
-    """
-    Order:
-    1. Local CSV (your laptop)
-    2. Dropbox CSV via secrets
-    3. Upload fallback
-    """
 
-    # 1. LOCAL FILE
+    # 1: Local CSV
     if LOCAL_DATA_CSV.exists():
         try:
             df_raw = pd.read_csv(LOCAL_DATA_CSV)
@@ -293,11 +254,10 @@ def load_data() -> pd.DataFrame:
         except Exception as e:
             st.error(f"Local CSV found but could not load: {e}")
 
-    # 2. DROPBOX (STREAMLIT CLOUD)
+    # 2: Dropbox CSV
     dropbox_url = None
     try:
-        if "data" in st.secrets and "csv_url" in st.secrets["data"]:
-            dropbox_url = st.secrets["data"]["csv_url"]
+        dropbox_url = st.secrets["data"]["csv_url"]
     except Exception:
         dropbox_url = None
 
@@ -308,12 +268,10 @@ def load_data() -> pd.DataFrame:
             df_proc = process_raw_dataframe(df_raw)
             if not df_proc.empty:
                 return df_proc
-            else:
-                st.warning("Dropbox file loaded, but produced an empty dataset.")
         except Exception as e:
             st.error(f"Could not load CSV from Dropbox: {e}")
 
-    # 3. UPLOAD FALLBACK
+    # 3: Upload fallback
     st.info("Please upload the enriched CSV to continue.")
     uploaded = st.file_uploader(
         "Upload enriched calls CSV",
@@ -330,7 +288,6 @@ def load_data() -> pd.DataFrame:
 
     return pd.DataFrame()
 
-
 # -------------------------------------------------------------------
 # LOAD ALL DATA
 # -------------------------------------------------------------------
@@ -339,10 +296,9 @@ df_all = load_data()
 
 if df_all.empty:
     st.title("Sales Call Coaching Dashboard")
-    st.warning("No calls found yet. Upload a CSV or check the Dropbox link.")
+    st.warning("No calls found. Upload a CSV or check Dropbox.")
     st.stop()
 
-# Global date range & last-updated info (based on call_datetime)
 global_min_dt = df_all["call_datetime"].min()
 global_max_dt = df_all["call_datetime"].max()
 last_updated = global_max_dt
@@ -406,35 +362,23 @@ df = df[~df["call_type"].isin(exclude_types)]
 
 if df.empty:
     st.title("Sales Call Coaching Dashboard")
-    st.warning("No matching calls found.")
+    st.warning("No matching calls.")
     st.stop()
 
 # -------------------------------------------------------------------
-# PAGE STRUCTURE
+# MAIN PAGE
 # -------------------------------------------------------------------
 
 st.title("Sales Call Coaching Dashboard")
 
-# Build a nice caption with date range + last updated
-if pd.notna(global_min_dt) and pd.notna(global_max_dt):
-    if global_min_dt.date() == global_max_dt.date():
-        date_span_text = f"Data for {global_min_dt.date():%Y-%m-%d}"
-    else:
-        date_span_text = (
-            f"Data from {global_min_dt.date():%Y-%m-%d} "
-            f"to {global_max_dt.date():%Y-%m-%d}"
-        )
-else:
-    date_span_text = "Data date range unavailable"
-
+# Last updated caption
 if pd.notna(last_updated):
-    last_updated_text = last_updated.strftime("%Y-%m-%d %H:%M")
     st.caption(
-        f"Use the sidebar to filter calls. {date_span_text}. "
-        f"Last updated: {last_updated_text} (based on latest call time)."
+        f"Use the sidebar to filter calls. Last updated: "
+        f"{last_updated.strftime('%Y-%m-%d %H:%M')}."
     )
 else:
-    st.caption(f"Use the sidebar to filter calls. {date_span_text}.")
+    st.caption("Use the sidebar to filter calls.")
 
 tab_intent, tab_coaching = st.tabs(["Buying Intent", "Coaching"])
 
@@ -477,25 +421,22 @@ with tab_intent:
 
     st.altair_chart(bar + labels, use_container_width=True)
 
-    st.markdown("### Calls by Intent")
-    intent_cols = [
-        "call_datetime",
-        "sales_rep",
-        "provider",
-        "intent",
-        "llm_cpd_intent",
-        "rule_intent",
-        "call_type",
+    # Table
+    cols = [
+        "call_datetime", "sales_rep", "provider",
+        "intent", "llm_cpd_intent", "rule_intent", "call_type"
     ]
-    intent_cols = [c for c in intent_cols if c in df.columns]
+    cols = [c for c in cols if c in df.columns]
 
+    st.markdown("### Calls by Intent")
     st.dataframe(
-        df[intent_cols].sort_values("call_datetime", ascending=False),
+        df[cols].sort_values("call_datetime", ascending=False),
         height=350,
         use_container_width=True,
     )
 
-    st.markdown("### Call Detail (Intent)")
+    # Detail view
+    st.markdown("### Call Detail")
     df_sel = df.copy()
     df_sel["_label"] = (
         df_sel["call_datetime"].astype(str)
@@ -505,13 +446,14 @@ with tab_intent:
     chosen = st.selectbox("Select a call", df_sel["_label"])
     row = df_sel[df_sel["_label"] == chosen].iloc[0]
 
-    col1, col2 = st.columns(2)
+    left, right = st.columns(2)
 
-    with col1:
+    with left:
         st.markdown("#### Intent Info")
         st.write(f"**Unified Intent:** {row['intent']}")
         st.write(f"**LLM Intent:** {row.get('llm_cpd_intent', '')}")
         st.write(f"**Rule Intent:** {row.get('rule_intent', '')}")
+        st.write("")
 
         st.markdown("#### Metadata")
         st.write(f"**Rep:** {row['sales_rep']}")
@@ -519,24 +461,16 @@ with tab_intent:
         st.write(f"**Direction:** {row.get('direction', '')}")
         st.write(f"**Call Type:** {row['call_type']}")
 
-    with col2:
+    with right:
         st.markdown("#### Transcript")
         st.write(row.get("transcript", ""))
 
-
 # -------------------------------------------------------------------
-# TAB 2 – COACHING
+# TAB 2 — COACHING
 # -------------------------------------------------------------------
 
 with tab_coaching:
     st.subheader("Average Sales Call Score by Rep")
-
-    score_cols = {
-        "Opening": "coaching_opening_score",
-        "Discovery": "coaching_discovery_score",
-        "Value": "coaching_value_score",
-        "Closing": "coaching_closing_score",
-    }
 
     df_coached = df[df["coaching_total_score"].notna()]
 
@@ -551,44 +485,48 @@ with tab_coaching:
         .rename(columns={"coaching_total_score": "AvgScore"})
     )
 
-    rep_bar = (
+    bar = (
         alt.Chart(rep_avg)
         .mark_bar()
         .encode(
             x="sales_rep:N",
             y="AvgScore:Q",
             color="sales_rep:N",
-            tooltip=["sales_rep", "AvgScore"],
         )
     )
 
-    rep_labels = (
+    labels = (
         alt.Chart(rep_avg)
         .mark_text(dy=-10, fontSize=18, fontWeight="bold")
-        .encode(
-            x="sales_rep:N",
-            y="AvgScore:Q",
-            text=alt.Text("AvgScore:Q", format=".1f"),
-        )
+        .encode(x="sales_rep:N", y="AvgScore:Q",
+               text=alt.Text("AvgScore:Q", format=".1f"))
     )
 
-    st.altair_chart(rep_bar + rep_labels, use_container_width=True)
+    st.altair_chart(bar + labels, use_container_width=True)
 
-    st.markdown("### Sales Call Scores by Pillar")
+    # Pillars
+    st.markdown("### Pillar Breakdown")
 
     records = []
     for _, r in df_coached.iterrows():
-        rep = r["sales_rep"]
-        for pillar, col in score_cols.items():
-            val = r.get(col)
-            if pd.notna(val):
-                records.append({"sales_rep": rep, "Pillar": pillar, "Score": float(val)})
+        for pillar, col in {
+            "Opening": "coaching_opening_score",
+            "Discovery": "coaching_discovery_score",
+            "Value": "coaching_value_score",
+            "Closing": "coaching_closing_score",
+        }.items():
+            if pd.notna(r.get(col)):
+                records.append({
+                    "sales_rep": r["sales_rep"],
+                    "Pillar": pillar,
+                    "Score": float(r[col])
+                })
 
     pillar_df = pd.DataFrame(records)
-
-    pillar_order = ["Opening", "Discovery", "Value", "Closing"]
     pillar_df["Pillar"] = pd.Categorical(
-        pillar_df["Pillar"], categories=pillar_order, ordered=True
+        pillar_df["Pillar"],
+        categories=["Opening", "Discovery", "Value", "Closing"],
+        ordered=True
     )
 
     summary = (
@@ -597,7 +535,7 @@ with tab_coaching:
         .reset_index()
     )
 
-    bars = (
+    bar = (
         alt.Chart(summary)
         .mark_bar()
         .encode(
@@ -605,13 +543,12 @@ with tab_coaching:
             xOffset="Pillar:N",
             y=alt.Y("Score:Q", scale=alt.Scale(domain=[0, 5])),
             color="Pillar:N",
-            tooltip=["sales_rep", "Pillar", "Score"],
         )
     )
 
     labels = (
         alt.Chart(summary)
-        .mark_text(dy=-12, fontWeight="bold", fontSize=18)
+        .mark_text(dy=-12, fontSize=18, fontWeight="bold")
         .encode(
             x="sales_rep:N",
             xOffset="Pillar:N",
@@ -620,9 +557,10 @@ with tab_coaching:
         )
     )
 
-    st.altair_chart(bars + labels, use_container_width=True)
+    st.altair_chart(bar + labels, use_container_width=True)
 
-    st.markdown("### Coached Calls")
+    # Table
+    st.markdown("### Coaching View — Calls")
 
     call_cols = [
         "call_datetime",
@@ -636,6 +574,7 @@ with tab_coaching:
         "coaching_closing_score",
         "call_type",
     ]
+
     call_cols = [c for c in call_cols if c in df_coached.columns]
 
     st.dataframe(
@@ -644,6 +583,7 @@ with tab_coaching:
         use_container_width=True,
     )
 
+    # Coaching detail
     st.markdown("### Coaching Detail")
 
     df_det = df_coached.copy()
@@ -654,16 +594,16 @@ with tab_coaching:
     )
 
     chosen2 = st.selectbox("Select a coached call", df_det["_label"])
-    row_c = df_det[df_det["_label"] == chosen2].iloc[0]
+    row = df_det[df_det["_label"] == chosen2].iloc[0]
 
-    left, right = st.columns(2)
+    col1, col2 = st.columns(2)
 
-    with left:
+    with col1:
         st.markdown("#### Coaching Summary")
-        st.write(row_c.get("coaching_summary", ""))
+        st.write(row.get("coaching_summary", ""))
 
         st.markdown("#### Improvement Points")
-        imp = row_c.get("coaching_improvement_points", "")
+        imp = row.get("coaching_improvement_points", "")
         if isinstance(imp, str) and imp.strip():
             for line in imp.split("\n"):
                 line = line.strip()
@@ -673,12 +613,12 @@ with tab_coaching:
             st.write("No improvement points provided.")
 
         st.markdown("#### Scores")
-        st.write(f"**Total:** {row_c.get('coaching_total_score', '')}")
-        st.write(f"**Opening:** {row_c.get('coaching_opening_score', '')}")
-        st.write(f"**Discovery:** {row_c.get('coaching_discovery_score', '')}")
-        st.write(f"**Value:** {row_c.get('coaching_value_score', '')}")
-        st.write(f"**Closing:** {row_c.get('coaching_closing_score', '')}")
+        st.write(f"**Total:** {row.get('coaching_total_score', '')}")
+        st.write(f"**Opening:** {row.get('coaching_opening_score', '')}")
+        st.write(f"**Discovery:** {row.get('coaching_discovery_score', '')}")
+        st.write(f"**Value:** {row.get('coaching_value_score', '')}")
+        st.write(f"**Closing:** {row.get('coaching_closing_score', '')}")
 
-    with right:
+    with col2:
         st.markdown("#### Transcript")
-        st.write(row_c.get("transcript", ""))
+        st.write(row.get("transcript", ""))
